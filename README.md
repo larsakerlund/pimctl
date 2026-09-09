@@ -26,10 +26,13 @@ release's sha256 list, and installs `pimctl` into `~/.local/bin`. Run
 `go install github.com/larsakerlund/pimctl/cmd/pimctl@latest`, or an archive
 from [Releases](https://github.com/larsakerlund/pimctl/releases).
 
+To uninstall: `pimctl cache clear --all`, then `rm ~/.local/bin/pimctl`.
+
 ## Quick start
 
 You need the [Azure CLI](https://learn.microsoft.com/cli/azure/) and an
-`az login`. That is the whole setup.
+`az login`. That is the whole setup. pimctl uses that login's token and holds no
+credentials of its own.
 
 ```sh
 pimctl ls                # what am I eligible for?
@@ -70,8 +73,8 @@ Exit 2 exists so a script cannot read "queued for approval" as success.
 per tenant. It is optional: without it, everything above works against your
 `az login`. With it, pimctl follows the context your shell is in, takes
 `-c <name>` per command, and reads every context at once with `--all-contexts`.
-It needs cloudctx 1.4.0 or newer. Whichever login a run uses, pimctl prints the
-tenant and user it resolved to.
+It needs cloudctx 1.4.0 or newer. It always tells you which tenant and user it
+used.
 
 ## Not covered
 
