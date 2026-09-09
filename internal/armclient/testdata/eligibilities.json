@@ -1,0 +1,71 @@
+{
+  "value": [
+    {
+      "id": "/subscriptions/66666666-6666-6666-6666-666666666666/providers/Microsoft.Authorization/roleEligibilityScheduleInstances/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      "name": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      "properties": {
+        "createdOn": "2026-07-01T12:28:43.81Z",
+        "endDateTime": "2027-02-17T00:00:00Z",
+        "expandedProperties": {
+          "principal": {
+            "displayName": "RBAC-ContosoDevelopers",
+            "id": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+            "type": "Group"
+          },
+          "roleDefinition": {
+            "displayName": "Contributor",
+            "id": "/subscriptions/66666666-6666-6666-6666-666666666666/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c",
+            "type": "BuiltInRole"
+          },
+          "scope": {
+            "displayName": "Contoso Identity",
+            "id": "/subscriptions/66666666-6666-6666-6666-666666666666",
+            "type": "subscription"
+          }
+        },
+        "memberType": "Group",
+        "principalId": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "principalType": "Group",
+        "roleDefinitionId": "/subscriptions/66666666-6666-6666-6666-666666666666/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c",
+        "roleEligibilityScheduleId": "/subscriptions/66666666-6666-6666-6666-666666666666/providers/Microsoft.Authorization/roleEligibilitySchedules/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        "scope": "/subscriptions/66666666-6666-6666-6666-666666666666",
+        "startDateTime": "2026-07-01T12:28:43.81Z",
+        "status": "Provisioned"
+      },
+      "type": "Microsoft.Authorization/roleEligibilityScheduleInstances"
+    },
+    {
+      "id": "/providers/Microsoft.Management/managementGroups/contoso-prod/providers/Microsoft.Authorization/roleEligibilityScheduleInstances/77777777-7777-7777-7777-777777777777",
+      "name": "77777777-7777-7777-7777-777777777777",
+      "properties": {
+        "createdOn": "2026-07-09T10:26:42.06Z",
+        "expandedProperties": {
+          "principal": {
+            "displayName": "Contoso-Cloud-Owners",
+            "id": "cccccccc-dddd-eeee-ffff-aaaaaaaaaaaa",
+            "type": "Group"
+          },
+          "roleDefinition": {
+            "displayName": "Contributor",
+            "id": "/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c",
+            "type": "BuiltInRole"
+          },
+          "scope": {
+            "displayName": "Contoso landing zones",
+            "id": "/providers/Microsoft.Management/managementGroups/contoso-prod",
+            "type": "managementgroup"
+          }
+        },
+        "memberType": "Group",
+        "principalId": "cccccccc-dddd-eeee-ffff-aaaaaaaaaaaa",
+        "principalType": "Group",
+        "roleDefinitionId": "/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c",
+        "roleEligibilityScheduleId": "/providers/Microsoft.Management/managementGroups/contoso-prod/providers/Microsoft.Authorization/roleEligibilitySchedules/77777777-7777-7777-7777-777777777777",
+        "scope": "/providers/Microsoft.Management/managementGroups/contoso-prod",
+        "startDateTime": "2026-07-09T10:26:42.06Z",
+        "status": "Provisioned"
+      },
+      "type": "Microsoft.Authorization/roleEligibilityScheduleInstances"
+    }
+  ]
+}

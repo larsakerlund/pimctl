@@ -1,0 +1,48 @@
+{
+  "id": "/subscriptions/44444444-4444-4444-4444-444444444444/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/88888888-8888-8888-8888-888888888888",
+  "name": "88888888-8888-8888-8888-888888888888",
+  "properties": {
+    "createdOn": "2026-08-10T09:27:45.317Z",
+    "expandedProperties": {
+      "principal": {
+        "displayName": "Ada Lovelace",
+        "email": "ada.lovelace@contoso.example",
+        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "type": "User",
+        "userPrincipalName": "ada.lovelace_contoso.example#EXT#@contoso.onmicrosoft.com"
+      },
+      "roleDefinition": {
+        "displayName": "Contributor",
+        "id": "/subscriptions/44444444-4444-4444-4444-444444444444/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c",
+        "type": "BuiltInRole"
+      },
+      "scope": {
+        "displayName": "PROD - CONTOSO PLATFORM - AZ - CONTOSO",
+        "id": "/subscriptions/44444444-4444-4444-4444-444444444444",
+        "type": "subscription"
+      }
+    },
+    "justification": "Deploy!",
+    "linkedRoleEligibilityScheduleId": "/providers/Microsoft.Management/managementGroups/contoso-prod/providers/Microsoft.Authorization/roleEligibilitySchedules/77777777-7777-7777-7777-777777777777",
+    "principalId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "principalType": "User",
+    "requestType": "SelfActivate",
+    "requestorId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "roleDefinitionId": "/subscriptions/44444444-4444-4444-4444-444444444444/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c",
+    "scheduleInfo": {
+      "expiration": {
+        "duration": "PT4H",
+        "type": "AfterDuration"
+      },
+      "startDateTime": "2026-08-10T09:27:45.3363556+00:00"
+    },
+    "scope": "/subscriptions/44444444-4444-4444-4444-444444444444",
+    "status": "Provisioned",
+    "targetRoleAssignmentScheduleId": "/subscriptions/44444444-4444-4444-4444-444444444444/providers/Microsoft.Authorization/roleAssignmentSchedules/88888888-8888-8888-8888-888888888888",
+    "ticketInfo": {
+      "ticketNumber": "",
+      "ticketSystem": ""
+    }
+  },
+  "type": "Microsoft.Authorization/roleAssignmentScheduleRequests"
+}

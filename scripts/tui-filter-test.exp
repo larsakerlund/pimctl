@@ -1,0 +1,85 @@
+#!/usr/bin/expect -f
+#
+# Proves pimctl's picker filters as you type — no "/" first — and that the
+# header describes the keys it actually binds.
+#
+# The narrowing is proved by a count, not by eyeballing a frame: after typing
+# "cost", ctrl+a selects all *matching* rows. If the filter had done nothing this
+# would come back with all 20.
+#
+# Usage:
+#   go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
+#   expect scripts/tui-filter-test.exp /tmp/pimctl-tuiprobe
+#
+# Note: every send must be preceded by an expect that drains the pty, or the
+# child blocks on a full output buffer and never sees the keystroke.
+
+set bin [lindex $argv 0]
+set timeout 20
+set env(TERM) "xterm-256color"
+# bubbletea sizes its viewport from the tty, not from $LINES/$COLUMNS.
+set stty_init "rows 40 columns 120"
+
+proc fail {msg} {
+    puts "\n!!! FAIL: $msg"
+    exit 1
+}
+
+puts "\n=== Typing filters directly: 20 rows narrow to 2 ==="
+spawn -noecho $bin select
+
+expect { "PROBE_ROWS=20" {} timeout { fail "probe never reported its row count" } }
+puts "\n>>> probe offered 20 rows"
+
+# Counts and key hints share one line, and expect consumes the buffer up to a
+# match — so assert the counts first, then the hints that follow them.
+expect {
+    -re "0 selected . 20 of 20 shown" {}
+    timeout { fail "the header does not show the selected/shown counts" }
+}
+puts "\n>>> CHECK 1 PASS: header shows '0 selected · 20 of 20 shown'"
+
+expect {
+    -re "type to filter, tab toggle, ctrl\\+a all, enter confirm" {}
+    timeout { fail "the header does not describe the real keys" }
+}
+puts "\n>>> CHECK 2 PASS: header says 'type to filter, tab toggle, ctrl+a all, enter confirm'"
+
+expect {
+    -re "Key Vault Administrator @ Contoso landing zones \\(contoso-prod\\)" {}
+    timeout { fail "the unfiltered list never rendered" }
+}
+puts "\n>>> CHECK 3 PASS: unfiltered list shows Key Vault Administrator (a row the filter must exclude)"
+
+# The whole point: plain characters, no leading "/".
+send -- "cost"
+expect {
+    -re "2 of 20 shown" {}
+    timeout { fail "typing 'cost' did not narrow the list — filtering still needs a prefix key" }
+}
+puts "\n>>> CHECK 4 PASS: typing 'cost' narrowed the header to '2 of 20 shown'"
+
+expect {
+    -re "Cost Management Contributor @ Contoso landing zones \\(contoso-" {}
+    timeout { fail "the matching rows are not shown" }
+}
+puts "\n>>> CHECK 5 PASS: the Cost Management Contributor rows are the ones kept"
+
+# ctrl+a selects every matching row; enter confirms.
+send -- "\001"
+expect { -re "2 selected" {} timeout { fail "ctrl+a did not select the matching rows" } }
+send -- "\r"
+
+expect {
+    "PROBE_SELECTED_COUNT=2" {}
+    -re "PROBE_SELECTED_COUNT=(\[0-9\]+)" {
+        fail "ctrl+a inside the filter returned $expect_out(1,string) rows, want 2 — the filter did not narrow the list"
+    }
+    timeout { fail "never reported a selection count" }
+}
+puts "\n>>> CHECK 6 PASS: ctrl+a inside the filter returned exactly 2 rows (20 -> 2)"
+
+expect { "PROBE_DONE" {} timeout { fail "probe did not finish" } }
+
+puts "\n=== FILTER NARROWING: PASSED ==="
+exit 0

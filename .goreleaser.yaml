@@ -1,0 +1,77 @@
+# Release build for pimctl. Run `goreleaser check` after editing; the release
+# workflow runs `goreleaser release` on a v* tag and nothing else builds this.
+version: 2
+
+project_name: pimctl
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pimctl
+    main: ./cmd/pimctl
+    binary: pimctl
+    env:
+      - CGO_ENABLED=0
+    # The tool talks to cloudctx and az on a developer's machine: macOS on both
+    # architectures, Linux for CI and remote shells. Nothing here is
+    # Windows-aware — the paths, the file modes and the pty tests all assume a
+    # POSIX machine — so Windows is deliberately absent rather than shipped
+    # untested.
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      # Same variable `make install` stamps, so a released binary reports its
+      # tag where a local build reports its commit.
+      - -s -w -X github.com/larsakerlund/pimctl/internal/cli.Version={{ .Version }}
+
+archives:
+  - id: pimctl
+    ids: [pimctl]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - SECURITY.md
+      - docs/design.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  # The hand-written CHANGELOG.md is the one that explains why; this is the
+  # commit list, which is worth having but is not the same document.
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ---
+
+    Install:
+
+        curl -fsSL https://raw.githubusercontent.com/larsakerlund/pimctl/main/install.sh | sh
+
+    or download the archive for your platform below, or
+
+        go install github.com/larsakerlund/pimctl/cmd/pimctl@{{ .Tag }}
+
+    `pimctl` needs the Azure CLI, and cloudctx if you work across tenants.
+    See SECURITY.md for what it caches and where.

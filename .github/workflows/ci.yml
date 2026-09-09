@@ -1,0 +1,127 @@
+name: CI
+
+# Pushes to main and pull requests. An unfiltered `push:` alongside
+# `pull_request:` runs everything twice for every branch that has a PR open.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with the version pin comment at the top of .golangci.yml.
+  GOLANGCI_LINT_VERSION: v2.12.2
+
+# Actions are pinned by commit SHA, with the version they correspond to in a
+# comment. A tag can be moved; a SHA cannot, and a supply-chain attack on a
+# popular action is a tag being repointed rather than a new release nobody
+# installs. Bump the comment and the SHA together.
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m
+      - name: formatters
+        run: golangci-lint fmt --diff ./...
+      - name: go vet
+        run: go vet ./...
+      # The documentation gate. Same command `make doccheck` runs locally; it
+      # needs no tools beyond the toolchain already set up above.
+      - name: doccheck
+        run: make doccheck
+      # install.sh is shell, which golangci-lint has nothing to say about.
+      # Ubuntu runners ship shellcheck; the guard is there so this keeps working
+      # if that ever stops being true.
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null || {
+            sudo apt-get update && sudo apt-get install -y shellcheck
+          }
+          shellcheck install.sh scripts/*.sh
+
+  vuln:
+    name: vuln
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Same command `make vuln` runs locally. Kept as its own job so a new
+      # advisory is reported as a security failure rather than buried in lint.
+      - run: make vuln
+
+  # macOS is where pimctl is actually used, and it is not the same platform:
+  # the file modes, the XDG fallbacks and the pty behaviour all differ from
+  # Linux. Testing only on ubuntu tested the machine nobody runs this on.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - run: go test -race -count=1 ./...
+
+  tui-test:
+    name: tui-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The picker tests drive a real pty through expect(1). The scripts set
+      # their own terminal size with stty_init and spawn their own pty, so they
+      # need no display and no interactive shell. macOS ships expect; Linux
+      # runners do not.
+      - name: install expect
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - run: make tui-test
+
+  # The installer is the first thing a new user runs, and it runs on their
+  # machine, not on a developer's. This job is that machine: it installs the
+  # latest release into a temporary directory on both platforms pimctl ships for,
+  # checks the binary reports that release, and checks a tampered archive is
+  # refused. The workflow's own token is enough — reading a release needs no more
+  # than the `contents: read` this workflow already has.
+  install-script:
+    name: install.sh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: make test-install
+        run: make test-install
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

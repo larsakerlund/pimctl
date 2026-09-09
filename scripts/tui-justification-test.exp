@@ -1,0 +1,70 @@
+#!/usr/bin/expect -f
+#
+# Proves the justification prompt is prefilled with the last-used text — the way
+# `pimctl activate` seeds it from state.json — and that accepting it unchanged
+# returns it verbatim rather than an empty string.
+#
+# Usage:
+#   go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
+#   expect scripts/tui-justification-test.exp /tmp/pimctl-tuiprobe
+#
+# Patterns are written with -re and literal text: a $variable inside a braced
+# expect pattern is not substituted, which silently never matches.
+
+set bin [lindex $argv 0]
+set timeout 20
+set env(TERM) "xterm-256color"
+set stty_init "rows 24 columns 120"
+
+proc fail {msg} {
+    puts "\n!!! FAIL: $msg"
+    exit 1
+}
+
+puts "\n=== Justification prompt is prefilled from the previous run ==="
+spawn -noecho $bin justification "deploying the landing zone"
+
+expect {
+    -re "PROBE_PREFILL=(\[^\r\n\]*)" {
+        if {$expect_out(1,string) ne "deploying the landing zone"} {
+            fail "probe received the prefill as '$expect_out(1,string)'"
+        }
+    }
+    timeout { fail "probe never started" }
+}
+puts "\n>>> probe seeded with the previous justification"
+
+expect {
+    -re "Justification" {}
+    timeout { fail "the justification prompt never rendered" }
+}
+puts "\n>>> prompt rendered"
+
+# The subtitle says why it is asking, so an unexpected prompt is explicable.
+expect {
+    -re "required by \\d+ of \\d+ roles you selected" {}
+    timeout { fail "the prompt does not say which roles require a justification" }
+}
+puts "\n>>> CHECK 0 PASS: the subtitle names how many roles require it"
+
+expect {
+    -re "deploying the landing zone" {}
+    timeout { fail "the prompt did not show the prefilled text — the user would have to retype it" }
+}
+puts "\n>>> CHECK 1 PASS: the prompt is prefilled with the previously used justification"
+
+# Accept it unchanged; the value must come back verbatim.
+send -- "\r"
+expect {
+    -re "PROBE_JUSTIFICATION=(\[^\r\n\]*)" {
+        if {$expect_out(1,string) ne "deploying the landing zone"} {
+            fail "accepting the prefill returned '$expect_out(1,string)'"
+        }
+    }
+    timeout { fail "no justification reported" }
+}
+puts "\n>>> CHECK 2 PASS: accepting the prefill returns it verbatim"
+
+expect { -re "PROBE_DONE" {} timeout { fail "probe did not finish" } }
+puts "\n=== JUSTIFICATION PREFILL: PASSED ==="
+exit 0

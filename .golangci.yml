@@ -1,0 +1,311 @@
+# golangci-lint configuration for pimctl.
+#
+# Pinned to golangci-lint v2.12.x — .github/workflows/ci.yml installs exactly
+# v2.12.2 (see GOLANGCI_LINT_VERSION there), so a green local `make lint` means
+# a green CI run. Bump both together.
+#
+# Policy: `default: all` — every linter golangci-lint ships is on unless it is
+# turned off below with a one-line reason. Do not loosen anything here without
+# the owner's approval; do not silence a finding with //nolint unless the same
+# line carries the reason why.
+#
+# Documentation is part of that gate. `revive`'s exported and package-comments
+# rules and `godot` are configured below; the half no linter covers — file
+# headers, and doc comments on unexported declarations — is checked by
+# internal/tools/doccheck, which `make check` runs alongside this file.
+version: "2"
+
+run:
+  # The interactive picker and its probe live behind the `tuiprobe` tag; without
+  # it the linter would skip cmd/tuiprobe and internal/cli/tuiprobe.go.
+  build-tags:
+    - tuiprobe
+  tests: true
+
+linters:
+  default: all
+  disable:
+    # --- Deliberately off: style religions that fight idiomatic Go ----------
+    - nlreturn # demands a blank line before every return; pure noise
+    - wsl_v5 # whitespace-placement religion, no defect-finding value
+    - noinlineerr # `if err := f(); err != nil` is idiomatic and used everywhere
+    - varnamelen # would rename idiomatic short receivers/loop vars (i, r, e)
+    - nonamedreturns # named returns are used deliberately in deferred cleanups
+    - ireturn # cobra/huh/bubbletea constructors legitimately return interfaces
+    - funcorder # cosmetic declaration ordering; large diff, zero defect value
+    - lll # line length is enforced by the golines formatter instead
+    - dupword # duplicated-word detector fires on prose in the long doc comments
+    - wsl # deprecated alias of wsl_v5, rejected for the same reason
+    - forbidigo # its default list forbids fmt.Print*, which is this CLI's output
+    - godox # TODO/FIXME notes are tracked in the code, not gated by the linter
+
+    # --- Deliberately off: too coarse for a CLI of this shape ---------------
+    - exhaustruct # would demand every field of every huh/cobra struct literal
+    - err113 # would force a sentinel error per call site; wrapping is enough
+    - gochecknoglobals # cobra command trees and Version are globals by design
+    - depguard # no import policy to enforce on a five-dependency module
+    - testpackage # tests intentionally live in-package to reach unexported code
+    # 84 t.Setenv calls isolate XDG_{CACHE,CONFIG,STATE}_HOME so a test can
+    # never write to the developer's own files. t.Setenv forbids t.Parallel in
+    # the same test, so this stays off until that isolation is done some other
+    # way — which would mean threading the directories through the code as
+    # parameters, a change to production shape for a test-speed win the suite
+    # does not need at 15 s.
+    - paralleltest
+    - maintidx # redundant with cyclop + funlen + nestif, and harder to reason about
+    - gocognit # redundant with cyclop; one complexity budget is enough
+    - gocyclo # superseded by cyclop, which also bounds the package average
+    - wrapcheck # every ARM/exec error is already wrapped with context at the
+      # boundary; wrapcheck additionally demands wrapping of errors returned
+      # straight from our own internal packages, which adds no information
+
+    # --- Not applicable: no such code in this module ------------------------
+    - sloglint # pimctl prints to stdout/stderr, it does not use log/slog
+    - testifylint # no testify dependency; tests are plain stdlib table tests
+    - zerologlint # no zerolog
+    - loggercheck # no kitlog/klog/logr/zap
+    - ginkgolinter # no ginkgo/gomega
+    - sqlclosecheck # no database/sql
+    - rowserrcheck # no database/sql
+    - unqueryvet # no SQL
+    - arangolint # no arangodb
+    - clickhouselint # no clickhouse
+    - protogetter # no protobuf
+    - promlinter # no prometheus metrics
+    - spancheck # no OpenTelemetry
+    - gosmopolitan # single-locale English CLI
+    - goheader # no licence header convention
+    - gomodguard_v2 # depguard-style module policy, nothing to guard
+    - gomodguard # deprecated alias of gomodguard_v2, off for the same reason
+    - tagliatelle # the only struct tags are ARM JSON names fixed by the API
+    - musttag # same: the ARM payload tags are dictated by the REST contract,
+      # and musttag cannot see through the generic request builders
+    - exhaustive # no enum-like typed constants; every switch is over strings
+      # coming off the wire, where a default case is the correct handling
+    - contextcheck # no background-context construction; ctx is threaded from
+      # main through every call, and contextcheck reports nothing here
+
+  settings:
+    godot:
+      # Every comment ends in a full stop — trailing field comments and notes
+      # inside a function body included, which is what `all` adds over the
+      # default. Not punctuation for its own sake: it is the cheapest signal
+      # that a comment is a finished sentence somebody wrote, rather than a
+      # fragment left behind by an edit.
+      scope: all
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+      exclude-functions:
+        # Formatted writes to the command's own output stream. A failed write to
+        # a closed terminal or pipe is not recoverable and not worth reporting;
+        # every other write path (tabwriter Flush, file writes, encoders) stays
+        # checked.
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+        # The tabwriter's Flush is the same write to the same stream, one call
+        # later; excluding Fprintln but not Flush would be arbitrary.
+        - (*text/tabwriter.Writer).Flush
+
+    govet:
+      enable-all: true
+      disable:
+        # Reorders struct fields for a handful of bytes; the ARM payload structs
+        # are laid out to match the REST documentation, which is worth more.
+        - fieldalignment
+      settings:
+        shadow:
+          # Non-strict: it still catches a shadowed `err`/variable that is used
+          # after the inner scope. Strict mode also flags shadowing that cannot
+          # change behaviour, and drowns the real findings.
+          strict: false
+
+    staticcheck:
+      checks:
+        - all
+
+    gosec:
+      excludes:
+        # G104 duplicates errcheck, which is configured more precisely above.
+        - G104
+
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: blank-imports
+        - name: comment-spacings
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: defer
+        - name: dot-imports
+        - name: early-return
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+          arguments:
+            # Unexported receivers are checked too: a method on an unexported
+            # type is still the thing the next reader has to understand.
+            # disableStutteringCheck is deliberately left off, so cache.Cache
+            # and the like are rejected rather than merely disliked.
+            - checkPrivateReceivers
+        - name: identical-branches
+        - name: if-return
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: modifies-value-receiver
+        - name: package-comments
+        - name: range
+        - name: range-val-address
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: string-of-int
+        - name: superfluous-else
+        - name: time-equal
+        - name: time-naming
+        - name: unchecked-type-assertion
+        - name: unexported-naming
+        - name: unexported-return
+        - name: unhandled-error
+          arguments:
+            # Same reasoning as the errcheck exclusions: terminal writes.
+            - "fmt\\.Fprint(f|ln)?"
+            - "fmt\\.Print(f|ln)?"
+        - name: unnecessary-stmt
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: unused-receiver
+        - name: use-any
+        - name: useless-break
+        - name: var-declaration
+        - name: var-naming
+        - name: waitgroup-by-value
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        # Would rewrite readable `if/else` chains into switches that read worse
+        # in the two places they fire; keep the author's shape.
+        - ifElseChain
+        # Fires on every `x := ...; if x` guard we deliberately keep separate.
+        - singleCaseSwitch
+      settings:
+        rangeValCopy:
+          # The ARM payload structs are 320-368 B and are ranged over a few
+          # dozen times per run. Ranging by pointer would let the selection and
+          # sorting code alias rows for no measurable gain. 512 keeps the check
+          # alive for anything genuinely large.
+          sizeThreshold: 512
+        hugeParam:
+          sizeThreshold: 512
+
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
+    goconst:
+      min-len: 3
+      min-occurrences: 4
+      ignore-tests: true
+
+    dupl:
+      threshold: 150
+
+    cyclop:
+      max-complexity: 15
+      package-average: 8.0
+
+    funlen:
+      lines: 80
+      statements: 50
+
+    nestif:
+      min-complexity: 5
+
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: true
+
+    perfsprint:
+      strconcat: false # `a + b` for two short strings is clearer than a builder
+
+    misspell:
+      locale: UK # the prose is written in British English throughout
+      ignore-rules:
+        # Identifiers and wire values that are American by definition: the
+        # NO_COLOR convention (no-color.org) and ARM's own error codes and
+        # Microsoft.Authorization resource names. Left to itself, the UK locale
+        # rewrites them and silently breaks the code.
+        - color
+        - colors
+        - authorize
+        - authorized
+        - authorization
+        - unauthorized
+        - organization
+
+    nakedret:
+      max-func-lines: 0 # no naked returns at all
+
+    mnd:
+      checks:
+        - argument
+        - case
+        - condition
+        - return
+        - assign
+      ignored-functions:
+        - os.Exit
+        - strconv.Format.*
+        - strconv.Parse.*
+        - strings.SplitN
+        - make
+        - time.Duration
+
+    nolintlint:
+      require-explanation: true # a //nolint without a reason is not accepted
+      require-specific: true # blanket //nolint is not accepted
+      allow-unused: false
+
+    unparam:
+      check-exported: false # exported signatures are part of the package API
+
+  exclusions:
+    generated: strict
+    warn-unused: true
+    rules:
+      # Tests are allowed to be long, repetitive and full of literals — that is
+      # what makes table tests readable. Nothing else is relaxed for them.
+      - path: _test\.go$
+        linters:
+          - funlen
+          - dupl
+          - mnd
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+    - golines
+  settings:
+    gofumpt:
+      extra-rules: true
+    goimports:
+      local-prefixes:
+        - github.com/larsakerlund/pimctl
+    golines:
+      max-len: 120
+      shorten-comments: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

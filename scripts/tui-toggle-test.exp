@@ -1,0 +1,93 @@
+#!/usr/bin/expect -f
+#
+# Proves that tab toggles exactly the row under the cursor while a filter is
+# active, and that a selection survives the filter changing under it.
+#
+# Two things meet here. A selection must never be silently lost or widened: an
+# earlier picker keyed options by their label string and toggled every option
+# sharing one, and this tenant has three management groups all displaying as
+# "Contoso landing zones". And a row selected under one filter must still be
+# confirmed after the filter moves on, or the selection is a lie.
+#
+# Usage:
+#   go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
+#   expect scripts/tui-toggle-test.exp /tmp/pimctl-tuiprobe
+
+set bin [lindex $argv 0]
+set timeout 20
+set env(TERM) "xterm-256color"
+set stty_init "rows 40 columns 120"
+
+proc fail {msg} {
+    puts "\n!!! FAIL: $msg"
+    exit 1
+}
+
+puts "\n=== Tab toggles exactly the row under the cursor ==="
+spawn -noecho $bin select
+
+expect { "PROBE_ROWS=20" {} timeout { fail "probe never started" } }
+expect {
+    -re "Key Vault Administrator @ Contoso landing zones \\(contoso-prod\\)" {}
+    timeout { fail "the list never rendered" }
+}
+
+send -- "cost"
+expect { -re "2 of 20 shown" {} timeout { fail "filter did not narrow" } }
+
+# Toggle the highlighted row.
+send -- "\t"
+expect { -re "1 selected" {} timeout { fail "tab did not toggle the highlighted row" } }
+puts "\n>>> CHECK 1 PASS: tab selected exactly one row"
+
+# Change the filter so the selected row is no longer shown; the selection must
+# survive. Esc clears the filter in one keystroke — sending four backspaces in
+# one burst outruns the redraws and the child never sees the later ones.
+send -- "\033"
+expect { -re "20 of 20 shown" {} timeout { fail "esc did not clear the filter" } }
+puts "\n>>> CHECK 2 PASS: esc cleared the filter without dropping the selection"
+# "vault" matches the three Key Vault Administrator rows and nothing the
+# selection touched. ("owner" would match Storage Blob Data Owner too.)
+# One pattern, because the counts share a line: matching "3 of 20 shown" alone
+# would consume the "1 selected" that precedes it and then wait forever for it.
+send -- "vault"
+expect {
+    -re "1 selected . 3 of 20 shown" {}
+    -re "0 selected . 3 of 20 shown" { fail "the selection was lost when the filter changed" }
+    timeout { fail "filter 'vault' did not narrow to 3 with the selection intact" }
+}
+puts "\n>>> CHECK 3 PASS: the selection survived the filter changing under it"
+
+send -- "\r"
+
+# The picker erases itself on exit and leaves exactly one line behind, so the
+# terminal is left as the picker found it rather than holding a dead snapshot
+# of a list nobody can interact with any more.
+expect {
+    -re "Selected 1 role" {}
+    timeout { fail "the erased picker left no 'Selected N roles' line behind" }
+}
+puts "\n>>> CHECK 4 PASS: the picker erased itself and left a one-line summary"
+
+expect {
+    "PROBE_SELECTED_COUNT=1" {}
+    "PROBE_SELECTED_COUNT=0" { fail "tab+enter produced an EMPTY selection" }
+    -re "PROBE_SELECTED_COUNT=(\[0-9\]+)" {
+        fail "tab toggled $expect_out(1,string) rows, want 1"
+    }
+    timeout { fail "never reported a selection count" }
+}
+puts "\n>>> CHECK 5 PASS: exactly one row was confirmed, though hidden by the final filter"
+
+expect {
+    -re "PROBE_SELECTED=Cost Management Contributor @ (contoso-\[a-z\]+)" {
+        puts "\n>>> CHECK 6 PASS: the confirmed row is Cost Management Contributor @ $expect_out(1,string)"
+    }
+    -re "PROBE_SELECTED=(\[^\r\n\]+)" { fail "the wrong row was confirmed: $expect_out(1,string)" }
+    timeout { fail "no selected row reported" }
+}
+
+expect { "PROBE_DONE" {} timeout { fail "probe did not finish" } }
+
+puts "\n=== TOGGLE-IN-FILTER: PASSED ==="
+exit 0
