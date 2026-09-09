@@ -31,7 +31,7 @@ To uninstall: `pimctl cache clear --all`, then `rm ~/.local/bin/pimctl`.
 ## Quick start
 
 You need the [Azure CLI](https://learn.microsoft.com/cli/azure/) and an
-`az login`. That is the whole setup. pimctl uses that login's token and holds no
+`az login`. That is the whole setup. pimctl uses that login's token and never asks for
 credentials of its own.
 
 ```sh
