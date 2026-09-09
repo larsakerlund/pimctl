@@ -110,8 +110,13 @@ jobs:
   # machine, not on a developer's. This job is that machine: it installs the
   # latest release into a temporary directory on both platforms pimctl ships for,
   # checks the binary reports that release, and checks a tampered archive is
-  # refused. The workflow's own token is enough — reading a release needs no more
-  # than the `contents: read` this workflow already has.
+  # refused.
+  #
+  # install.sh needs no token, and one of the checks proves it by unsetting the
+  # variable. The workflow's token is still passed in for the rest, because
+  # GitHub allows an unauthenticated caller sixty API requests an hour per
+  # address and these runners share addresses with everyone else's jobs — a rate
+  # limit here would look like a broken installer.
   install-script:
     name: install.sh (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

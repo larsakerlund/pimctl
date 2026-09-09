@@ -6,10 +6,10 @@
 # It runs the real thing against the real latest release — an installer that is
 # only ever exercised against a stub is an installer nobody has tested.
 #
-# install.sh needs no credential of its own. This script still resolves one from
-# $GITHUB_TOKEN or a logged-in gh, because the repository it downloads from is
-# not readable without one yet; once it is, the token stops being necessary and
-# PIMCTL_PUBLIC=1 turns on the check that proves it.
+# Nothing here needs a credential. $GITHUB_TOKEN is passed through when the
+# environment has one — CI sets it, and it raises GitHub's API rate limit — and
+# one check deliberately unsets it, so the path a stranger takes is tested on
+# every run rather than assumed.
 #
 # Nothing is installed outside the temporary directory this script makes, and
 # the expected version is resolved from the GitHub API here rather than taken
@@ -40,21 +40,6 @@ pass() {
 work=$(mktemp -d "${TMPDIR:-/tmp}/pimctl-install-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-# resolve_token finds a credential to hand the installer, if the machine has one.
-#
-# It is not an error to have none: PIMCTL_PUBLIC=1 says the repository can be
-# read without one, and the checks below then run exactly as a stranger's
-# install would.
-resolve_token() {
-  token="${GITHUB_TOKEN:-}"
-  if [ -z "$token" ] && command -v gh >/dev/null 2>&1; then
-    token=$(gh auth token --hostname github.com 2>/dev/null || true)
-  fi
-  if [ -z "$token" ] && [ -z "${PIMCTL_PUBLIC:-}" ]; then
-    fail "no token: set GITHUB_TOKEN, log in with gh, or set PIMCTL_PUBLIC=1 once $repo is public"
-  fi
-}
-
 # resolve_expected_tag asks the API which release install.sh ought to pick, so
 # the version check below compares two independent answers.
 resolve_expected_tag() {
@@ -64,8 +49,8 @@ resolve_expected_tag() {
   fi
   : >"$work/curl.conf"
   chmod 600 "$work/curl.conf"
-  if [ -n "$token" ]; then
-    printf 'header = "Authorization: Bearer %s"\n' "$token" >"$work/curl.conf"
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" >"$work/curl.conf"
   fi
   curl -sSL --config "$work/curl.conf" \
     --header "Accept: application/vnd.github+json" \
@@ -84,7 +69,7 @@ resolve_expected_tag() {
 installs_a_working_binary() {
   printf '=== install.sh installs the latest release ===\n'
   bindir="$work/bin"
-  GITHUB_TOKEN="$token" PIMCTL_INSTALL_DIR="$bindir" \
+  PIMCTL_INSTALL_DIR="$bindir" \
     sh "$root/install.sh" >"$work/install.out" 2>&1 ||
     fail "install.sh exited non-zero: $(cat "$work/install.out")"
   cat "$work/install.out"
@@ -107,7 +92,7 @@ refuses_a_tampered_download() {
   printf '\n=== install.sh refuses an archive that does not match checksums.txt ===\n'
   baddir="$work/bin-tampered"
   set +e
-  GITHUB_TOKEN="$token" PIMCTL_TEST_CORRUPT=1 PIMCTL_INSTALL_DIR="$baddir" \
+  PIMCTL_TEST_CORRUPT=1 PIMCTL_INSTALL_DIR="$baddir" \
     sh "$root/install.sh" >"$work/tampered.out" 2>&1
   rc=$?
   set -e
@@ -142,19 +127,13 @@ prints_its_usage_without_touching_anything() {
   pass "-h prints the usage and exits 0"
 }
 
-# installs_without_a_token is the check that the one-liner in the README works
-# for someone who has never heard of a GitHub token.
+# installs_without_a_token is the check that the README's one-liner works for
+# someone who has never heard of a GitHub token.
 #
-# It is behind PIMCTL_PUBLIC=1 because it can only pass once the repository is
-# public: an unauthenticated read of a repository you cannot see returns 404,
-# and a check that fails for a reason unrelated to the code under test teaches
-# nobody anything. On flip day, run `PIMCTL_PUBLIC=1 make test-install`, watch
-# this pass, and delete the gate.
+# It unsets the variables rather than trusting the environment to be empty,
+# because CI runs with a token in it: without this the stranger's path would be
+# the one path nothing tested.
 installs_without_a_token() {
-  if [ -z "${PIMCTL_PUBLIC:-}" ]; then
-    printf '\n=== skipped: install.sh with no token (set PIMCTL_PUBLIC=1 once %s is public) ===\n' "$repo"
-    return
-  fi
   printf '\n=== install.sh installs with no token at all ===\n'
   puredir="$work/bin-public"
   env -u GITHUB_TOKEN -u GH_TOKEN PIMCTL_INSTALL_DIR="$puredir" \
@@ -168,7 +147,6 @@ installs_without_a_token() {
   pass "an unauthenticated install works and reports $expected_tag"
 }
 
-resolve_token
 resolve_expected_tag
 installs_a_working_binary
 refuses_a_tampered_download
