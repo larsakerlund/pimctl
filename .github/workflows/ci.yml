@@ -112,11 +112,12 @@ jobs:
   # checks the binary reports that release, and checks a tampered archive is
   # refused.
   #
-  # install.sh needs no token, and one of the checks proves it by unsetting the
-  # variable. The workflow's token is still passed in for the rest, because
-  # GitHub allows an unauthenticated caller sixty API requests an hour per
-  # address and these runners share addresses with everyone else's jobs — a rate
-  # limit here would look like a broken installer.
+  # install.sh needs no token: two of the checks prove it, unsetting the variable
+  # and asserting the run never reached api.github.com. The workflow's token is
+  # passed in so the other path is exercised too — with a token the installer
+  # goes through the API, which is what a private repository requires — and
+  # because an API call made under a token is not subject to the sixty-an-hour
+  # cap that these runners would otherwise share with every other job.
   install-script:
     name: install.sh (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

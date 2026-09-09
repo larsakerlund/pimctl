@@ -6,9 +6,12 @@
 #
 #     curl -fsSL https://raw.githubusercontent.com/larsakerlund/pimctl/main/install.sh | sh
 #
-# It needs no credential. $GITHUB_TOKEN is sent when the environment has one,
-# which raises GitHub's API rate limit and is what a CI job already carries; the
-# one thing the script never does is print it.
+# It needs no credential, and does not use the GitHub API to avoid needing one:
+# the tag comes from where /releases/latest redirects, and the files from the
+# release's public download URLs. $GITHUB_TOKEN, when the environment has one,
+# switches to the API instead — which is how a repository that requires a
+# credential serves its assets — and the one thing the script never does is
+# print it.
 #
 # POSIX sh on purpose: this runs under whatever /bin/sh the machine has, so no
 # bashisms, no arrays and no `local`. Functions therefore share one set of
@@ -38,8 +41,9 @@ It picks the archive for this machine's OS and architecture, verifies it
 against the release's sha256 list, and installs the binary.
 
 Environment:
-  GITHUB_TOKEN        Optional. Sent as a bearer token, which raises GitHub's
-                      API rate limit. Not needed to install.
+  GITHUB_TOKEN        Optional. Switches to the GitHub API, which a private
+                      repository needs. Without it the public release URLs are
+                      used, and no API rate limit applies.
   PIMCTL_VERSION      Release to install, e.g. v0.1.1. Default: the latest.
   PIMCTL_INSTALL_DIR  Where the binary goes. Default: \$HOME/.local/bin.
 
@@ -68,10 +72,11 @@ need_tool() {
 
 # resolve_token sets token to the credential to send, or to nothing.
 #
-# Installing needs no credential. A token is sent when $GITHUB_TOKEN holds one,
-# because GitHub's API allows an unauthenticated caller only sixty requests an
-# hour per address — enough for one install, not for a busy CI runner — and this
-# script makes three.
+# Installing a public release needs none, and the paths below go around the
+# GitHub API so that it stays true: unauthenticated API calls are capped at sixty
+# an hour per address, and a hosted CI runner shares its address with every other
+# job on the platform. A token switches to the API, which a repository that
+# requires a credential has no alternative to.
 #
 # Any command this script runs takes its stdin from /dev/null, because when the
 # script arrives through a pipe its own remaining text is on stdin, and a child
@@ -121,12 +126,24 @@ make_workspace() {
   fi
 }
 
+# trace prints the URL about to be requested when PIMCTL_TRACE is set.
+#
+# scripts/test-install.sh reads this to prove the tokenless path never reaches
+# api.github.com. Only URLs are printed: the token lives in a config file and is
+# never part of one.
+trace() {
+  if [ -n "${PIMCTL_TRACE:-}" ]; then
+    printf 'trace: GET %s\n' "$1" >&2
+  fi
+}
+
 # http_get fetches a URL into a file and sets status to the HTTP status code.
 #
 # Arguments: URL, the Accept header to send, the file to write. The status is
 # returned rather than acted on because what a 404 means depends on what was
 # being asked for.
 http_get() {
+  trace "$1"
   status=$(curl -sSL --config "$curl_conf" \
     --header "Accept: $2" \
     --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -135,12 +152,50 @@ http_get() {
     die "cannot reach $1"
 }
 
-# fetch_release writes the release metadata to $work/release.json and sets tag
-# to the release it describes.
+# resolve_release sets tag to the release that will be installed.
 #
-# PIMCTL_VERSION names a release directly; without it the latest one is used,
-# which is what the one-liner in the README relies on.
-fetch_release() {
+# Three ways in. PIMCTL_VERSION names the tag outright and costs no request at
+# all. Without it, the tag comes from where /releases/latest redirects — a plain
+# github.com request, outside the API and its rate limit. A token switches to the
+# API, because a token is the only reason to prefer it: a repository that
+# requires a credential serves its assets through the API and nowhere else.
+resolve_release() {
+  if [ -n "$token" ]; then
+    fetch_release_json
+    return
+  fi
+  if [ -n "${PIMCTL_VERSION:-}" ]; then
+    tag="$PIMCTL_VERSION"
+    return
+  fi
+  resolve_tag_from_redirect
+}
+
+# resolve_tag_from_redirect sets tag from where the "latest release" page sends
+# a browser.
+#
+# GitHub answers https://github.com/<repo>/releases/latest with a 302 to
+# .../releases/tag/<tag>: the tag name, with nothing to parse around it. A
+# repository with no releases redirects to .../releases instead, so the shape is
+# checked rather than the last path element taken on faith.
+resolve_tag_from_redirect() {
+  latest="https://github.com/$repo/releases/latest"
+  trace "$latest"
+  redirect=$(curl -sS --config "$curl_conf" \
+    --retry 2 --connect-timeout 15 --max-time 60 \
+    --output /dev/null --write-out '%{redirect_url}' "$latest") ||
+    die "cannot reach $latest"
+  case "$redirect" in
+  */releases/tag/*) tag="${redirect##*/}" ;;
+  *) die "no release to install: $latest did not lead to one" ;;
+  esac
+}
+
+# fetch_release_json writes the release metadata to $work/release.json and sets
+# tag to the release it describes. It is the token's path: only the API knows an
+# asset's id, and only an asset id downloads from a repository that requires a
+# credential.
+fetch_release_json() {
   if [ -n "${PIMCTL_VERSION:-}" ]; then
     release_url="$api/releases/tags/$PIMCTL_VERSION"
   else
@@ -203,20 +258,41 @@ fetch_asset() {
   [ "$status" = 200 ] || die "cannot download $3 (HTTP $status)"
 }
 
-# download_archive fetches the archive for this platform and the release's
-# checksum list, setting archive to the archive's file name.
-download_archive() {
-  archive="pimctl_${tag#v}_${os}_${arch}.tar.gz"
+# download_from_release_url fetches one of a release's files by name.
+#
+# https://github.com/<repo>/releases/download/<tag>/<file> is the public path,
+# served through GitHub's CDN rather than the API, which is the whole point: no
+# rate limit to run into and no credential to need.
+download_from_release_url() {
+  url="https://github.com/$repo/releases/download/$tag/$1"
+  http_get "$url" "application/octet-stream" "$2"
+  [ "$status" = 200 ] || die "cannot download $1 from release $tag (HTTP $status)"
+}
 
+# download_via_api fetches the same two files through the API, by asset id.
+download_via_api() {
   archive_id=$(asset_id "$archive")
   [ -n "$archive_id" ] || die "release $tag has no $archive"
   sums_id=$(asset_id checksums.txt)
   [ -n "$sums_id" ] ||
     die "release $tag has no checksums.txt, so nothing can be verified"
 
-  say "downloading $archive ($tag)"
   fetch_asset "$archive_id" "$work/$archive" "$archive"
   fetch_asset "$sums_id" "$work/checksums.txt" checksums.txt
+}
+
+# download_archive fetches the archive for this platform and the release's
+# checksum list, setting archive to the archive's file name.
+download_archive() {
+  archive="pimctl_${tag#v}_${os}_${arch}.tar.gz"
+
+  say "downloading $archive ($tag)"
+  if [ -n "$token" ]; then
+    download_via_api
+  else
+    download_from_release_url "$archive" "$work/$archive"
+    download_from_release_url checksums.txt "$work/checksums.txt"
+  fi
 
   # The one test hook. scripts/test-install.sh sets it to prove the
   # checksum gate refuses a tampered download. It can only make the
@@ -344,7 +420,7 @@ main() {
   detect_sha_tool
   detect_platform
   make_workspace
-  fetch_release
+  resolve_release
   download_archive
   verify_archive
   install_binary

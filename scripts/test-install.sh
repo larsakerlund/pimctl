@@ -40,27 +40,38 @@ pass() {
 work=$(mktemp -d "${TMPDIR:-/tmp}/pimctl-install-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-# resolve_expected_tag asks the API which release install.sh ought to pick, so
-# the version check below compares two independent answers.
+# resolve_expected_tag works out which release install.sh ought to pick, so the
+# version checks below compare two answers rather than trusting one.
+#
+# With a token — which is the CI case — it asks the API, which is the route
+# install.sh does not take when it is unauthenticated: the two answers then come
+# from genuinely different places. Without one it reads the same redirect
+# install.sh reads, because an unauthenticated API call is the thing this whole
+# change exists to avoid.
 resolve_expected_tag() {
   if [ -n "${PIMCTL_VERSION:-}" ]; then
     expected_tag="$PIMCTL_VERSION"
     return
   fi
-  : >"$work/curl.conf"
-  chmod 600 "$work/curl.conf"
   if [ -n "${GITHUB_TOKEN:-}" ]; then
+    : >"$work/curl.conf"
+    chmod 600 "$work/curl.conf"
     printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" >"$work/curl.conf"
+    curl -sSL --config "$work/curl.conf" \
+      --header "Accept: application/vnd.github+json" \
+      --output "$work/latest.json" \
+      "https://api.github.com/repos/$repo/releases/latest" ||
+      fail "cannot read the latest release"
+    expected_tag=$(tr ',' '\n' <"$work/latest.json" |
+      sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' |
+      head -n 1)
+  else
+    expected_tag=$(curl -sS --output /dev/null --write-out '%{redirect_url}' \
+      "https://github.com/$repo/releases/latest") ||
+      fail "cannot reach the latest-release page"
+    expected_tag="${expected_tag##*/}"
   fi
-  curl -sSL --config "$work/curl.conf" \
-    --header "Accept: application/vnd.github+json" \
-    --output "$work/latest.json" \
-    "https://api.github.com/repos/$repo/releases/latest" ||
-    fail "cannot read the latest release"
-  expected_tag=$(tr ',' '\n' <"$work/latest.json" |
-    sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' |
-    head -n 1)
-  [ -n "$expected_tag" ] || fail "the API did not name a latest release"
+  [ -n "$expected_tag" ] || fail "could not tell which release is the latest"
 }
 
 # installs_a_working_binary runs the installer as the one-liner does and checks
@@ -122,8 +133,8 @@ prints_its_usage_without_touching_anything() {
   [ "$rc" -eq 0 ] || fail "install.sh -h exited $rc"
   grep -q 'PIMCTL_INSTALL_DIR' "$work/usage.out" ||
     fail "the usage does not mention PIMCTL_INSTALL_DIR"
-  grep -q 'Not needed to install' "$work/usage.out" ||
-    fail "the usage does not say a token is optional"
+  grep -qE 'GITHUB_TOKEN[[:space:]]+Optional\.' "$work/usage.out" ||
+    fail "the usage does not say the token is optional"
   pass "-h prints the usage and exits 0"
 }
 
@@ -136,7 +147,7 @@ prints_its_usage_without_touching_anything() {
 installs_without_a_token() {
   printf '\n=== install.sh installs with no token at all ===\n'
   puredir="$work/bin-public"
-  env -u GITHUB_TOKEN -u GH_TOKEN PIMCTL_INSTALL_DIR="$puredir" \
+  env -u GITHUB_TOKEN -u GH_TOKEN PIMCTL_TRACE=1 PIMCTL_INSTALL_DIR="$puredir" \
     sh "$root/install.sh" >"$work/public.out" 2>&1 ||
     fail "install.sh needs a token: $(cat "$work/public.out")"
   cat "$work/public.out"
@@ -145,6 +156,17 @@ installs_without_a_token() {
   [ "$got" = "pimctl ${expected_tag#v}" ] ||
     fail "installed binary reports '$got', expected 'pimctl ${expected_tag#v}'"
   pass "an unauthenticated install works and reports $expected_tag"
+
+  # The point of the check above is not only that it worked here, but that it
+  # cannot start failing on a busy runner: an unauthenticated API call is capped
+  # at sixty an hour per address, and CI shares addresses. PIMCTL_TRACE prints
+  # every URL requested, so this is checkable rather than assumed.
+  grep -q 'trace: GET https://github.com/' "$work/public.out" ||
+    fail "no trace output; this check cannot see what was requested"
+  if grep -q 'api\.github\.com' "$work/public.out"; then
+    fail "the tokenless path called the API: $(grep 'api\.github\.com' "$work/public.out" | head -n 1)"
+  fi
+  pass "it used the public release URLs and never called api.github.com"
 }
 
 resolve_expected_tag

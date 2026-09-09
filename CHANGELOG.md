@@ -9,7 +9,15 @@ The exit-code contract will not change without a major version.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`install.sh` no longer uses the GitHub API when it has no token.** The tag
+  comes from where `/releases/latest` redirects, and the files from the
+  release's public download URLs. An unauthenticated API caller gets sixty
+  requests an hour per address, which a shared address can exhaust for everyone
+  on it — the installer answered `HTTP 403` on a CI runner for that reason and
+  nothing else. `GITHUB_TOKEN`, when the environment has one, still selects the
+  API, which is what a private repository requires.
 
 ## [0.2.0] - 2026-09-09
 
