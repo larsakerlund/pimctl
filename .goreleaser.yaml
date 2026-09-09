@@ -43,6 +43,7 @@ archives:
       - CHANGELOG.md
       - SECURITY.md
       - docs/design.md
+      - docs/usage.md
 
 checksum:
   name_template: checksums.txt
