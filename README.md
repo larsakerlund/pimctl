@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Activate the **Azure resource roles** you are eligible for through Microsoft
-Entra Privileged Identity Management, from the command line, several at a time.
+Entra Privileged Identity Management, from the command line, in batch.
 
 ```console
 $ pimctl up --role "Cost Management Contributor" --for 1h -j "landing zone work" -y
@@ -66,14 +66,12 @@ Exit 2 exists so a script cannot read "queued for approval" as success.
 
 ## Working across tenants
 
-[cloudctx](https://github.com/eliknut/cloudctx) gives each tenant its own Azure
-CLI login store. It is optional — without it everything above works against your
-`az login` — and when it is installed pimctl follows the context the shell is
-scoped to, takes `-c <name>` per command, and reads every context at once with
-`--all-contexts`. cloudctx 1.4.0 or newer is required, the release that declared
-the [companion contract](https://github.com/eliknut/cloudctx/blob/main/docs/companions.md)
-pimctl drives; an older one is refused by name. Whichever login a run uses, it
-prints the tenant and user that login resolved to.
+[cloudctx](https://github.com/eliknut/cloudctx) keeps a separate Azure CLI login
+per tenant. It is optional: without it, everything above works against your
+`az login`. With it, pimctl follows the context your shell is in, takes
+`-c <name>` per command, and reads every context at once with `--all-contexts`.
+It needs cloudctx 1.4.0 or newer. Whichever login a run uses, pimctl prints the
+tenant and user it resolved to.
 
 ## Not covered
 
