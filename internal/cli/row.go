@@ -89,17 +89,17 @@ func (r row) ActiveUntil() *time.Time {
 }
 
 // matchActivations attaches the live activation (if any) to each eligible row.
-func matchActivations(rows []row, active []armclient.Assignment) []row {
+func matchActivations(rows []row, active []activeRow) []row {
 	byKey := map[string]*armclient.Assignment{}
 	for i := range active {
-		a := &active[i]
+		a := &active[i].Assignment
 		if !a.IsActivated() {
 			continue
 		}
-		byKey[rowKey("", a.Properties.Scope, a.RoleDefinitionGUID())] = a
+		byKey[rowKey(active[i].Context, a.Properties.Scope, a.RoleDefinitionGUID())] = a
 	}
 	for i := range rows {
-		k := rowKey("", rows[i].Elig.Properties.Scope, rows[i].Elig.RoleDefinitionGUID())
+		k := rows[i].Key()
 		if a, ok := byKey[k]; ok {
 			rows[i].Active = a
 		}

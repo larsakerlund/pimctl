@@ -8,7 +8,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -56,7 +55,7 @@ func verifyConfirming(
 	ctx context.Context,
 	rc *runContext,
 	active []activeRow,
-	unconfirmedScopes []string,
+	unconfirmedScopes []activationScope,
 ) map[string]entryVerdict {
 	listed := map[string]bool{}
 	for _, a := range active {
@@ -67,10 +66,9 @@ func verifyConfirming(
 	var ask []confirmQuestion
 	now := time.Now()
 	for _, s := range rc.Sessions {
-		label := s.Token.Label()
-		for _, e := range readRecord(label) {
+		for _, e := range readRecord(s.Token.Label()) {
 			switch {
-			case !e.Confirming(now), listed[entryKey(e)], unread[strings.ToLower(e.Scope)]:
+			case !e.Confirming(now), listed[entryKey(e)], scopeIsUnread(unread, e.Context, e.Scope):
 				continue
 			case e.RequestID == "":
 				// An entry from an older version, or one written before the

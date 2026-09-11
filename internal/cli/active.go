@@ -79,6 +79,23 @@ func (s rowState) marker() string {
 	}
 }
 
+// activationScope identifies a scope within the session that discovered it.
+// An empty ID asks for that session's tenant-wide listing when it has no
+// eligible scopes. Context is a session label, never discarded during merging.
+type activationScope struct {
+	Context string // session label owning this scope.
+	ID      string // full ARM scope id, empty for a tenant-wide fallback.
+}
+
+// key identifies a scope without conflating equal management-group names in
+// different contexts. ARM ids are case-insensitive; context labels are preserved.
+func (s activationScope) key() string { return s.Context + "|" + strings.ToLower(s.ID) }
+
+// sortScopes orders scope references by context and then ARM id.
+func sortScopes(scopes []activationScope) {
+	slices.SortFunc(scopes, func(a, b activationScope) int { return strings.Compare(a.key(), b.key()) })
+}
+
 // activeResult is the outcome of the background activation listing.
 type activeResult struct {
 	rows []activeRow // every activation the read did see.
@@ -86,7 +103,7 @@ type activeResult struct {
 	// unconfirmed holds the scope ids whose call missed the soft deadline. Their
 	// state is unknown, not empty — the difference matters, so they are named
 	// rather than silently under-reported.
-	unconfirmed []string
+	unconfirmed []activationScope
 }
 
 // timeouts are a run's time budgets, gathered in one value on [runContext].
@@ -218,7 +235,7 @@ func (f *activeFuture) TryGet() (activeResult, bool) {
 // and returns the future to poll. The goroutine is registered with rc, so
 // [runContext.finish] tears it down; scopes nil means "work them out from the
 // eligibility listing".
-func startActivationListing(ctx context.Context, rc *runContext, scopes []string) *activeFuture {
+func startActivationListing(ctx context.Context, rc *runContext, scopes []activationScope) *activeFuture {
 	f := &activeFuture{ch: make(chan activeResult, 1)}
 	rc.bg.Go(func() {
 		rows, errs, unconfirmed := listActivations(ctx, rc, scopes)
@@ -249,13 +266,13 @@ func scopeFanOutFor(scopes int) int {
 // scopeTally accumulates the fan-out's results and its timing figures. Every
 // field is guarded by mu: the per-scope calls all write into one tally.
 type scopeTally struct {
-	mu    sync.Mutex    // guards every field below.
-	rows  []activeRow   // activations found, before deduplication across nested scopes.
-	errs  []error       // scopes that answered with an error rather than late.
-	slow  []string      // scope ids that missed the deadline: unknown, not empty.
-	calls int           // per-scope calls made, for the --debug line.
-	maxD  time.Duration // the slowest call, which is what sets the wall time.
-	sumD  time.Duration // every call's duration added up, to show what concurrency bought.
+	mu    sync.Mutex        // guards every field below.
+	rows  []activeRow       // activations found, before deduplication across nested scopes.
+	errs  []error           // scopes that answered with an error rather than late.
+	slow  []activationScope // scope ids that missed the deadline: unknown, not empty.
+	calls int               // per-scope calls made, for the --debug line.
+	maxD  time.Duration     // the slowest call, which is what sets the wall time.
+	sumD  time.Duration     // every call's duration added up, to show what concurrency bought.
 }
 
 // record folds one per-scope call's duration into the fan-out's figures, for
@@ -281,7 +298,6 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 	defer cancelCall()
 
 	callStart := time.Now()
-
 	var assignments []armclient.Assignment
 	err := retryOn401(s, func() error {
 		var e error
@@ -302,7 +318,7 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 			// entries as well as printed, and labelling it here once made every
 			// row at an unread scope silently vanish. Presentation happens at
 			// the point of printing.
-			tally.slow = append(tally.slow, scope)
+			tally.slow = append(tally.slow, activationScope{Context: s.Token.Label(), ID: scope})
 			return
 		}
 		// One unreadable scope must not sink the rest: the user may simply have
@@ -331,8 +347,8 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 func listActivations(
 	ctx context.Context,
 	rc *runContext,
-	scopes []string,
-) (rows []activeRow, errs []error, unconfirmed []string) {
+	scopes []activationScope,
+) (rows []activeRow, errs []error, unconfirmed []activationScope) {
 	if rc.AllScopes {
 		r, e := tenantWideActivations(ctx, rc)
 		return r, e, nil
@@ -361,14 +377,16 @@ func listActivations(
 	sem := make(chan struct{}, scopeFanOutFor(len(scopes)))
 	var wg sync.WaitGroup
 	start := time.Now()
-	for _, s := range rc.Sessions {
-		for _, scope := range scopes {
-			wg.Go(func() {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				listActivationsAtScope(ctx, rc, s, scope, tally)
-			})
+	for _, scope := range scopes {
+		sess := sessionFor(rc.Sessions, scope.Context)
+		if sess == nil {
+			continue
 		}
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			listActivationsAtScope(ctx, rc, sess, scope.ID, tally)
+		})
 	}
 	wg.Wait()
 
@@ -382,7 +400,7 @@ func listActivations(
 
 	out := dedupeActivations(tally.rows)
 	sortActivations(out)
-	slices.Sort(tally.slow)
+	sortScopes(tally.slow)
 	return out, slices.Concat(scopeErrs, tally.errs), slices.Compact(tally.slow)
 }
 
@@ -392,8 +410,8 @@ func dedupeActivations(rows []activeRow) []activeRow {
 	seen := map[string]bool{}
 	out := make([]activeRow, 0, len(rows))
 	for _, r := range rows {
-		id := strings.ToLower(r.Assignment.ID)
-		if id != "" && seen[id] {
+		id := r.Context + "|" + strings.ToLower(r.Assignment.ID)
+		if r.Assignment.ID != "" && seen[id] {
 			continue
 		}
 		seen[id] = true
@@ -415,27 +433,18 @@ func sortActivations(out []activeRow) {
 
 // eligibleScopes returns the distinct scopes the user is eligible at, from the
 // cache when it is warm and from ARM when it is not.
-func eligibleScopes(ctx context.Context, rc *runContext) (scopes []string, errs []error) {
-	seen := map[string]bool{}
-	add := func(list []armclient.Eligibility) {
-		for _, e := range list {
-			sc := e.Properties.Scope
-			if sc == "" {
-				continue
-			}
-			rc.names.learn(sc, e.ScopeName())
-			if seen[strings.ToLower(sc)] {
-				continue
-			}
-			seen[strings.ToLower(sc)] = true
-			scopes = append(scopes, sc)
+func eligibleScopes(ctx context.Context, rc *runContext) (scopes []activationScope, errs []error) {
+	add := func(label string, elig []armclient.Eligibility) {
+		for _, e := range elig {
+			rc.names.learn(e.Properties.Scope, e.ScopeName())
 		}
+		scopes = append(scopes, scopesFor(label, elig)...)
 	}
 	for _, s := range rc.Sessions {
 		label := s.Token.Label()
 		if !rc.Refresh {
 			if cached, _, ok := cache.Read(label); ok {
-				add(cached)
+				add(label, cached)
 				continue
 			}
 		}
@@ -445,7 +454,6 @@ func eligibleScopes(ctx context.Context, rc *runContext) (scopes []string, errs 
 		// drops rows: `cache clear` followed by a piped `status` took two
 		// minutes and exited 1 because this returned nothing here.
 		var elig []armclient.Eligibility
-
 		err := rc.Timings.Track("ARM roleEligibilityScheduleInstances ("+label+")", func() error {
 			return retryOn401(s, func() error {
 				var e error
@@ -462,9 +470,9 @@ func eligibleScopes(ctx context.Context, rc *runContext) (scopes []string, errs 
 			continue
 		}
 		cache.Write(label, elig)
-		add(elig)
+		add(label, elig)
 	}
-	slices.Sort(scopes)
+	sortScopes(scopes)
 	return scopes, errs
 }
 

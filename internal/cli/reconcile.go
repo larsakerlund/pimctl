@@ -5,7 +5,6 @@
 package cli
 
 import (
-	"strings"
 	"time"
 )
 
@@ -115,7 +114,12 @@ func forgetActivations(results []result) {
 //
 // Tombstones work the same way in reverse: one is kept while ARM still lists the
 // role it denies, and dropped once the listing agrees it is gone.
-func reconcileRecord(context string, active []activeRow, unconfirmedScopes []string, verdicts map[string]entryVerdict) {
+func reconcileRecord(
+	context string,
+	active []activeRow,
+	unconfirmedScopes []activationScope,
+	verdicts map[string]entryVerdict,
+) {
 	unknown := unreadScopes(unconfirmedScopes)
 	listed := map[string]activeRow{}
 	for _, a := range active {
@@ -140,7 +144,7 @@ func keepAgainstListing(
 	revoked = map[string]bool{}
 	kept = make([]recordEntry, 0, len(previous))
 	for _, e := range previous {
-		scopeUnread := unknown[strings.ToLower(e.Scope)]
+		scopeUnread := scopeIsUnread(unknown, e.Context, e.Scope)
 		row, isListed := listed[e.Key]
 		switch {
 		case e.Revoked():

@@ -58,7 +58,11 @@ func TestMatchActivations(t *testing.T) {
 			return a
 		}(),
 	}
-	rows = matchActivations(rows, active)
+	contextual := make([]activeRow, 0, len(active))
+	for _, a := range active {
+		contextual = append(contextual, activeRow{Context: "contoso", Assignment: a})
+	}
+	rows = matchActivations(rows, contextual)
 	if rows[0].IsActive() {
 		t.Error("a permanently Assigned role must not be reported as activated")
 	}

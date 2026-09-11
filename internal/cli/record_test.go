@@ -245,7 +245,12 @@ func TestReconcileKeepsEntriesAtUnconfirmedScopes(t *testing.T) {
 	// ARM returned nothing, but contoso-test timed out rather than answering.
 	// Scopes are matched by id: the printed label is a rendering of this, never
 	// the identity itself.
-	reconcileRecord("contoso", nil, []string{"/providers/Microsoft.Management/managementGroups/contoso-test"}, nil)
+	reconcileRecord(
+		"contoso",
+		nil,
+		[]activationScope{{Context: "contoso", ID: "/providers/Microsoft.Management/managementGroups/contoso-test"}},
+		nil,
+	)
 
 	got := readRecord("contoso")
 	if len(got) != 1 {

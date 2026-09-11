@@ -58,7 +58,7 @@ func TestStatusRendersFromTheRecordWithoutWaiting(t *testing.T) {
 
 	rows := localActiveRows(&runContext{Sessions: []*session{{
 		Context: "contoso",
-		Token:   &azauth.Token{Context: "contoso"},
+		Token:   &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1"},
 	}}})
 	if len(rows) != 1 {
 		t.Fatalf("the record produced %d rows, want 1", len(rows))
@@ -161,7 +161,7 @@ func installStatusFake(t *testing.T, srv *httptest.Server) {
 	t.Setenv(envContext, "")
 	installFakeRunner(t, []string{"contoso"})
 	installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
-		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid", TenantID: "tid"}
+		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid-1", TenantID: "tid-1"}
 		return []*session{{
 			Context: "contoso", Token: tok,
 			Client: armclient.New(srv.URL, tok.AccessToken, srv.Client()),
@@ -416,7 +416,7 @@ func TestReportStatusDelta(t *testing.T) {
 		name        string
 		local       localRecord
 		active      []activeRow
-		unconfirmed []string
+		unconfirmed []activationScope
 		want        []string
 		absent      []string
 	}{
@@ -448,7 +448,7 @@ func TestReportStatusDelta(t *testing.T) {
 			name:        "an unread scope is not a loss",
 			local:       localRecord{rows: []activeRow{held}},
 			active:      nil,
-			unconfirmed: []string{held.Assignment.Properties.Scope},
+			unconfirmed: []activationScope{{Context: held.Context, ID: held.Assignment.Properties.Scope}},
 			want:        []string{"unconfirmed (slow ARM)", "Contoso landing zones (contoso-prod)"},
 			absent:      []string{"no longer held"},
 		},

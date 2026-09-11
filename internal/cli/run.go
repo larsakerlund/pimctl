@@ -177,7 +177,7 @@ func abortedEarly(ctx context.Context) bool { return ctx.Err() != nil }
 // reportUnconfirmedScopes names the scopes whose listing was cut short. Naming
 // them is the whole point: "N roles active" from an incomplete read would be a
 // quiet under-report, which for an access tool is worse than a slow answer.
-func reportUnconfirmedScopes(cmd *cobra.Command, rc *runContext, scopes []string) {
+func reportUnconfirmedScopes(cmd *cobra.Command, rc *runContext, scopes []activationScope) {
 	if len(scopes) == 0 {
 		return
 	}
@@ -190,10 +190,17 @@ func reportUnconfirmedScopes(cmd *cobra.Command, rc *runContext, scopes []string
 }
 
 // labelScopes renders scope ids for a human, the way the tables do.
-func labelScopes(rc *runContext, ids []string) []string {
+func labelScopes(rc *runContext, ids []activationScope) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, rc.names.label(id))
+		label := rc.names.label(id.ID)
+		if id.ID == "" {
+			label = "all scopes"
+		}
+		if len(rc.Sessions) > 1 {
+			label = id.Context + ": " + label
+		}
+		out = append(out, label)
 	}
 	return out
 }

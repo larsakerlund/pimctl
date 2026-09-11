@@ -7,7 +7,6 @@
 package cli
 
 import (
-	"strings"
 	"time"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
@@ -60,7 +59,7 @@ func readLocalRecord(rc *runContext) localRecord {
 	now := time.Now()
 	for _, s := range rc.Sessions {
 		label := s.Token.Label()
-		for _, e := range readRecord(label) {
+		for _, e := range readRecord(s.Token.Label()) {
 			row := recordRow(label, s, e)
 			if e.Revoked() {
 				lr.revoked[activeSelectionKey(row)] = e
@@ -123,7 +122,7 @@ func localActiveRows(rc *runContext) []activeRow {
 // the listing has not caught up with is kept for as long as its own schedule
 // request says it is provisioned, and a role given up here is kept out while the
 // listing still reports it.
-func mergeActive(local localRecord, active []activeRow, unconfirmed []string) []activeRow {
+func mergeActive(local localRecord, active []activeRow, unconfirmed []activationScope) []activeRow {
 	unknown := unreadScopes(unconfirmed)
 	seen := map[string]bool{}
 	out := make([]activeRow, 0, len(active))
@@ -140,7 +139,7 @@ func mergeActive(local localRecord, active []activeRow, unconfirmed []string) []
 		if seen[key] {
 			continue
 		}
-		scopeUnread := unknown[strings.ToLower(r.Assignment.Properties.Scope)]
+		scopeUnread := scopeIsUnread(unknown, r.Context, r.Assignment.Properties.Scope)
 		if !local.stands(r, scopeUnread) {
 			continue
 		}
@@ -156,10 +155,16 @@ func mergeActive(local localRecord, active []activeRow, unconfirmed []string) []
 // listing that omits it. Indexing it by anything a human would read means a
 // renamed or relabelled scope stops matching, and every row at an unread scope
 // silently disappears.
-func unreadScopes(unconfirmed []string) map[string]bool {
+func unreadScopes(unconfirmed []activationScope) map[string]bool {
 	out := make(map[string]bool, len(unconfirmed))
 	for _, id := range unconfirmed {
-		out[strings.ToLower(id)] = true
+		out[id.key()] = true
 	}
 	return out
+}
+
+// scopeIsUnread checks both an individual scope and a tenant-wide fallback.
+// A failed fallback leaves every scope in that context unknown.
+func scopeIsUnread(unknown map[string]bool, label, id string) bool {
+	return unknown[(activationScope{Context: label, ID: id}).key()] || unknown[(activationScope{Context: label}).key()]
 }

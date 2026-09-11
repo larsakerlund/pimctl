@@ -141,7 +141,7 @@ func reportStatusDelta(
 	rc *runContext,
 	local localRecord,
 	active []activeRow,
-	unconfirmed []string,
+	unconfirmed []activationScope,
 ) {
 	added, dropped := statusDelta(local, active, unconfirmed)
 	armCount := 0
@@ -175,14 +175,14 @@ func reportStatusDelta(
 // runs is exactly the thing a user needs told rather than left to notice: it may
 // be an expiry, a colleague's deactivation, or an activation that never took.
 // Nothing is said when nothing was lost — the table speaks for itself.
-func reportRecordDrops(cmd *cobra.Command, local localRecord, active []activeRow, unconfirmed []string) {
+func reportRecordDrops(cmd *cobra.Command, local localRecord, active []activeRow, unconfirmed []activationScope) {
 	if _, dropped := statusDelta(local, active, unconfirmed); len(dropped) > 0 {
 		fmt.Fprintln(cmd.ErrOrStderr(), lostRolesLine(dropped))
 	}
 }
 
 // statusDelta compares what this machine believed with what Azure reported.
-func statusDelta(local localRecord, active []activeRow, unconfirmed []string) (added, dropped []string) {
+func statusDelta(local localRecord, active []activeRow, unconfirmed []activationScope) (added, dropped []string) {
 	scopes := scopeLabelerForActive(slices.Concat(local.rows, active))
 	localKeys := map[string]activeRow{}
 	for _, r := range local.rows {
@@ -211,7 +211,7 @@ func statusDelta(local localRecord, active []activeRow, unconfirmed []string) (a
 		if _, ok := armKeys[k]; ok {
 			continue
 		}
-		if local.stands(r, unknown[strings.ToLower(r.Assignment.Properties.Scope)]) {
+		if local.stands(r, scopeIsUnread(unknown, r.Context, r.Assignment.Properties.Scope)) {
 			continue
 		}
 		dropped = append(dropped, describeRow(scopes, r))

@@ -8,7 +8,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +30,7 @@ func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) 
 	var (
 		mu      sync.Mutex
 		rows    []row
+		scopes  []activationScope
 		errs    []error
 		wg      sync.WaitGroup
 		oldest  time.Duration
@@ -53,7 +53,6 @@ func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) 
 				}
 			}
 			if !fromCache {
-
 				err := rc.Timings.Track("ARM roleEligibilityScheduleInstances ("+label+")", func() error {
 					return retryOn401(s, func() error {
 						var e error
@@ -79,7 +78,9 @@ func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) 
 				cacheOK = false
 				cache.Write(label, elig)
 			}
+			scopes = append(scopes, scopesFor(label, elig)...)
 			for _, e := range elig {
+				rc.names.learn(e.Properties.Scope, e.ScopeName())
 				rows = append(rows, row{Context: label, Elig: e})
 			}
 		}(s)
@@ -99,32 +100,33 @@ func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) 
 
 	// The fan-out needs the eligibility scopes, so it starts once they are
 	// known — which is the point at which the picker can already be shown.
-	scopes := distinctScopes(rows)
+	sortScopes(scopes)
 	future := startActivationListing(ctx, rc, scopes)
 	return rows, errs, future
 }
 
-// distinctScopes lists the scopes a row set covers.
-func distinctScopes(rows []row) []string {
+// scopesFor retains the context for each distinct eligibility scope. A session
+// with no eligible scopes gets one tenant-wide fallback, never another tenant's
+// scopes. The result is sorted for deterministic discovery.
+func scopesFor(label string, elig []armclient.Eligibility) []activationScope {
 	seen := map[string]bool{}
-	var out []string
-	for _, r := range rows {
-		sc := r.Elig.Properties.Scope
-		if sc == "" || seen[strings.ToLower(sc)] {
+	out := make([]activationScope, 0, len(elig))
+	for _, e := range elig {
+		id := e.Properties.Scope
+		if id == "" || seen[strings.ToLower(id)] {
 			continue
 		}
-		seen[strings.ToLower(sc)] = true
-		out = append(out, sc)
+		seen[strings.ToLower(id)] = true
+		out = append(out, activationScope{Context: label, ID: id})
 	}
-	slices.Sort(out)
+	if len(out) == 0 {
+		out = append(out, activationScope{Context: label})
+	}
+	sortScopes(out)
 	return out
 }
 
-// applyActive marks the rows covered by an activation listing.
+// applyActive marks rows using activation identity, including their context.
 func applyActive(rows []row, active []activeRow) []row {
-	assignments := make([]armclient.Assignment, 0, len(active))
-	for _, a := range active {
-		assignments = append(assignments, a.Assignment)
-	}
-	return matchActivations(rows, assignments)
+	return matchActivations(rows, active)
 }

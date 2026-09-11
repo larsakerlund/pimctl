@@ -22,7 +22,7 @@ import (
 // they are labelled for a human and carried into the JSON even when there are
 // none. An encoding failure is reported on stderr rather than returned — half
 // a JSON document has already reached the caller by then.
-func printStatus(cmd *cobra.Command, rc *runContext, rows []activeRow, unconfirmed []string) {
+func printStatus(cmd *cobra.Command, rc *runContext, rows []activeRow, unconfirmed []activationScope) {
 	if rc.Opts.json() {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -30,7 +30,7 @@ func printStatus(cmd *cobra.Command, rc *runContext, rows []activeRow, unconfirm
 			// An always-present field is one less branch for a caller: an empty
 			// array says "everything was read", where a missing key says only
 			// that this pimctl did not think to mention it.
-			unconfirmed = []string{}
+			unconfirmed = []activationScope{}
 		}
 		if err := enc.Encode(statusJSON{
 			Roles:             toActiveJSON(rows),

@@ -6,9 +6,11 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,85 @@ import (
 	"github.com/larsakerlund/pimctl/internal/azauth"
 	"github.com/larsakerlund/pimctl/internal/cache"
 )
+
+func TestActivationDiscoveryKeepsEachContextsScopes(t *testing.T) {
+	for _, emptySecond := range []bool{false, true} {
+		t.Run(strconv.FormatBool(emptySecond), func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			var mu sync.Mutex
+			queries := map[string][]string{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				label := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				scope := strings.TrimSuffix(
+					r.URL.Path,
+					"/providers/Microsoft.Authorization/roleAssignmentScheduleInstances",
+				)
+				mu.Lock()
+				queries[label] = append(queries[label], scope)
+				mu.Unlock()
+				if scope != "/subscriptions/"+label && (!emptySecond || label != "globex" || scope != "") {
+					w.WriteHeader(http.StatusForbidden)
+					fmt.Fprint(w, `{"error":{"code":"AuthorizationFailed","message":"wrong tenant"}}`)
+					return
+				}
+				fmt.Fprint(w, `{"value":[]}`)
+			}))
+			t.Cleanup(srv.Close)
+			rc := &runContext{Ctx: context.Background(), Timeouts: defaultTimeouts(), Timings: newTimings(false)}
+			for _, label := range []string{"contoso", "globex"} {
+				tok := &azauth.Token{Context: label, AccessToken: label, TenantID: label, PrincipalID: "oid-1"}
+				rc.Sessions = append(
+					rc.Sessions,
+					&session{Context: label, Token: tok, Client: armclient.New(srv.URL, label, srv.Client())},
+				)
+				elig := []armclient.Eligibility{
+					mkElig("Reader", "reader-guid", "/subscriptions/"+label, label, "Subscription"),
+				}
+				if emptySecond && label == "globex" {
+					elig = nil
+				}
+				cache.Write(label, elig)
+			}
+			_, errs, slow := listActivations(rc.Ctx, rc, nil)
+			if len(errs) > 0 || len(slow) > 0 {
+				t.Fatalf("healthy contexts failed: %v %v", errs, slow)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, label := range []string{"contoso", "globex"} {
+				if len(queries[label]) != 1 {
+					t.Errorf("%s queried %v; want exactly its own scope or fallback", label, queries[label])
+				}
+			}
+		})
+	}
+}
+
+func TestActivationMatchingAndUnknownScopesKeepContext(t *testing.T) {
+	scope := "/providers/Microsoft.Management/managementGroups/shared-name"
+	a := mkActivated("Reader", "reader-guid", scope, "Shared", time.Now().Add(time.Hour))
+	a.ID = scope + "/instances/shared-id"
+	active := []activeRow{{Context: "contoso", Assignment: a}, {Context: "globex", Assignment: a}}
+	if got := len(dedupeActivations(active)); got != 2 {
+		t.Fatalf("deduplication lost another context: %d", got)
+	}
+	rows := []row{
+		{Context: "contoso", Elig: mkElig("Reader", "reader-guid", scope, "Shared", "ManagementGroup")},
+		{Context: "globex", Elig: mkElig("Reader", "reader-guid", scope, "Shared", "ManagementGroup")},
+	}
+	matched := applyActive(rows, active[:1])
+	if !matched[0].IsActive() || matched[1].IsActive() {
+		t.Fatal("one context's activation marked another context active")
+	}
+	for i := range active {
+		active[i].State = RowUnconfirmed
+	}
+	local := localRecord{rows: active}
+	merged := mergeActive(local, nil, []activationScope{{Context: "contoso", ID: scope}})
+	if len(merged) != 1 || merged[0].Context != "contoso" {
+		t.Fatalf("unknown scope affected another context: %+v", merged)
+	}
+}
 
 // TestActiveFanOutQueriesEachScope pins the replacement for ARM's tenant-wide
 // activation listing, which takes 11-21s and was measured returning 126/131/132
@@ -103,7 +184,7 @@ func TestActiveFanOutQueriesEachScope(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv(envContext, "")
 	installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
-		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid", TenantID: "tid"}
+		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid-1", TenantID: "tid-1"}
 		return []*session{
 			{Context: "contoso", Token: tok, Client: armclient.New(srv.URL, tok.AccessToken, srv.Client())},
 		}, nil, nil
@@ -159,7 +240,7 @@ func TestAllScopesFallsBackToTheTenantWideCall(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv(envContext, "")
 	installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
-		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid", TenantID: "tid"}
+		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid-1", TenantID: "tid-1"}
 		return []*session{
 			{Context: "contoso", Token: tok, Client: armclient.New(srv.URL, tok.AccessToken, srv.Client())},
 		}, nil, nil
@@ -246,7 +327,7 @@ func TestSlowScopeIsReportedNotWaitedFor(t *testing.T) {
 	t.Setenv(envContext, "")
 	installFakeRunner(t, []string{"contoso"})
 	installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
-		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid", TenantID: "tid"}
+		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid-1", TenantID: "tid-1"}
 		return []*session{{
 			Context: "contoso", Token: tok,
 			Client: armclient.New(srv.URL, tok.AccessToken, srv.Client()),
