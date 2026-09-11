@@ -209,15 +209,19 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 	return reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
 }
 
-// readActivations reads what is currently activated, reporting the contexts that
-// could not be reached along the way.
+// readActivations reads Azure and local activation evidence, retaining recorded
+// roles as deactivation candidates even when omitted from the listing. It
+// verifies pending records and reports every failed or incomplete read.
 func readActivations(
 	ctx context.Context,
 	cmd *cobra.Command,
 	rc *runContext,
 ) (active []activeRow, failures []error, err error) {
+	local := readLocalRecord(rc)
 	sp := term.NewSpinner(cmd.ErrOrStderr(), "reading active roles…")
 	active, listErrs, slowScopes := listActivations(ctx, rc, nil)
+	local.verdicts = verifyConfirming(ctx, rc, active, slowScopes)
+	active = deactivationCandidates(local, active)
 	sp.Stop()
 	if abortedEarly(ctx) {
 		return nil, nil, ctx.Err()

@@ -167,7 +167,7 @@ func TestOneContextListFailureKeepsTheOthersRows(t *testing.T) {
 		t.Errorf("the error does not name the failing context: %v", errs[0])
 	}
 
-	active, errs := listTenantWide(context.Background(), sessions)
+	active, errs, _ := listTenantWide(context.Background(), sessions)
 	if len(errs) != 1 {
 		t.Fatalf("listTenantWide: got %d errors, want 1", len(errs))
 	}

@@ -33,6 +33,7 @@ vet:
 # cmd/tuiprobe with every other binary; nothing from that tag is compiled into
 # the shipped pimctl binary.
 tui-test:
+	sh scripts/test-tui-harness.sh
 	go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
 	expect scripts/tui-filter-test.exp /tmp/pimctl-tuiprobe
 	expect scripts/tui-toggle-test.exp /tmp/pimctl-tuiprobe

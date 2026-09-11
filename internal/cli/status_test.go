@@ -449,7 +449,7 @@ func TestReportStatusDelta(t *testing.T) {
 			local:       localRecord{rows: []activeRow{held}},
 			active:      nil,
 			unconfirmed: []activationScope{{Context: held.Context, ID: held.Assignment.Properties.Scope}},
-			want:        []string{"unconfirmed (slow ARM)", "Contoso landing zones (contoso-prod)"},
+			want:        []string{"unconfirmed (ARM did not answer)", "Contoso landing zones (contoso-prod)"},
 			absent:      []string{"no longer held"},
 		},
 		{
@@ -492,6 +492,55 @@ func TestReportStatusDelta(t *testing.T) {
 			// where a `-o json` consumer would have to parse around it.
 			if errOut.Len() == 0 {
 				t.Error("the delta printed nothing at all")
+			}
+		})
+	}
+}
+
+func TestStatusPreservesRecordOnReadFailure(t *testing.T) {
+	for _, mode := range []string{"forbidden", "server error", "eligibility", "tenant-wide"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/roleEligibilityScheduleInstances") && mode != "eligibility" {
+					writeJSON(t, w, map[string]any{"value": twoLowImpactRoles()})
+					return
+				}
+				status := http.StatusForbidden
+				if mode == "server error" {
+					status = http.StatusInternalServerError
+				}
+				w.WriteHeader(status)
+				writeJSON(
+					t,
+					w,
+					map[string]any{"error": map[string]any{"code": "ReadFailed", "message": "read unavailable"}},
+				)
+			}))
+			defer srv.Close()
+			installStatusFake(t, srv)
+			entry := mkRecordEntry("Contributor", "contoso-prod", time.Hour)
+			entry.Listed = true
+			writeRecord(testOwner("contoso"), []recordEntry{entry})
+			args := []string{"status", "-c", "contoso", "-o", "json"}
+			if mode == "tenant-wide" {
+				args = append(args, "--all-scopes")
+			}
+			out, stderr, err := runCmd(t, args...)
+			if err == nil {
+				t.Fatal("a failed read must not report success")
+			}
+			if len(readRecord(testOwner("contoso"))) != 1 {
+				t.Fatal("read failure erased live record")
+			}
+			var got statusJSON
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Roles) != 1 || got.Roles[0].Confirmed || len(got.UnconfirmedScopes) == 0 {
+				t.Fatalf("missing unconfirmed role or scope: %s", out)
+			}
+			if strings.Contains(stderr, "no longer held") {
+				t.Errorf("read failure reported a loss: %s", stderr)
 			}
 		})
 	}

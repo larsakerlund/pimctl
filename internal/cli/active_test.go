@@ -348,7 +348,7 @@ func TestSlowScopeIsReportedNotWaitedFor(t *testing.T) {
 	if !strings.Contains(out, "Cost Management Contributor") {
 		t.Errorf("the scope that answered should still be reported:\n%s", out)
 	}
-	if !strings.Contains(errOut, "unconfirmed (slow ARM)") || !strings.Contains(errOut, "contoso-slow") {
+	if !strings.Contains(errOut, "unconfirmed (ARM did not answer)") || !strings.Contains(errOut, "contoso-slow") {
 		t.Errorf("the slow scope must be named, not silently dropped: %q", errOut)
 	}
 	if !strings.Contains(errOut, "--wait") {

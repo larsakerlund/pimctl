@@ -110,6 +110,42 @@ func localActiveRows(rc *runContext) []activeRow {
 	return readLocalRecord(rc).rows
 }
 
+// reconcileActive verifies unlisted activations, updates local's verdicts and
+// persists the merged evidence for each session. It performs bounded ARM reads
+// and local writes. Failed scopes stay unknown rather than erasing records.
+func reconcileActive(rc *runContext, local *localRecord, res activeResult) []activeRow {
+	local.verdicts = verifyConfirming(rc.Ctx, rc, res.rows, res.unconfirmed)
+	merged := mergeActive(*local, res.rows, res.unconfirmed)
+	for _, s := range rc.Sessions {
+		reconcileRecord(s.owner(), res.rows, res.unconfirmed, local.verdicts)
+	}
+	return merged
+}
+
+// deactivationCandidates includes every recorded role not definitively gone,
+// even when a successful but lagging listing omits it. The deactivation request
+// will resolve that uncertainty. Listed rows take precedence, and tombstones
+// still suppress stale rows for access already given up here.
+func deactivationCandidates(local localRecord, active []activeRow) []activeRow {
+	out := make([]activeRow, 0, len(active)+len(local.rows))
+	seen := map[string]bool{}
+	for _, r := range active {
+		if local.denies(r) {
+			continue
+		}
+		seen[activeSelectionKey(r)] = true
+		out = append(out, r)
+	}
+	for _, r := range local.rows {
+		key := activeSelectionKey(r)
+		if !seen[key] && local.verdicts[key] != verdictGone {
+			out = append(out, r)
+		}
+	}
+	sortActivations(out)
+	return out
+}
+
 // mergeActive combines what Azure listed with what this machine knows that the
 // listing cannot see yet.
 //

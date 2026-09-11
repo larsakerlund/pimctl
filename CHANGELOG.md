@@ -21,6 +21,17 @@ The exit-code contract will not change without a major version.
 
 ### Fixed
 
+- `down` includes locally recorded activations even when Azure omits them;
+  failed activation reads preserve records and identify unread scopes.
+- Context names retain their case in role identities, presets and matching.
+  Older selection keys remain accepted only when unambiguous.
+- Authenticated pagination and redirects cannot leave the configured ARM origin.
+- `list` completes reconciliation after its initial output, marks uncertain
+  activation state, and honours local deactivation records under `--with-active`.
+  JSON rows include `confirmed` and `state` alongside `active`.
+- Polling budgets now bound request and retry waits as well as poll intervals.
+- Terminal tests reject missing output on timeout and unexpected EOF; the gate
+  also checks its assertion handlers against deliberately silent probes.
 - Cached ARM tokens are reused only when the selected Azure CLI account still
   matches both tenant and user. Missing account information forces a fresh token.
 - Deactivation returns a failure when scope reads are incomplete and no longer

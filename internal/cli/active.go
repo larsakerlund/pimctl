@@ -37,14 +37,15 @@ type activeRow struct {
 type rowState int
 
 const (
-	// RowConfirmed means Azure listed this role as activated.
+	// RowConfirmed means Azure answered for this role's scope. An activeRow
+	// with this state was listed as activated; an eligible row may be inactive.
 	RowConfirmed rowState = iota
 	// RowConfirming means this machine activated it and Azure has not caught
 	// up. Azure's listing lags a fresh activation by minutes, so its absence
 	// there is not evidence of anything yet; the role's own schedule request is.
 	RowConfirming
-	// RowUnconfirmed means the row comes from this machine's record because
-	// Azure did not answer for its scope at all.
+	// RowUnconfirmed means Azure has not answered for the row's scope. Local
+	// evidence may suggest access, but its absence cannot prove inactivity.
 	RowUnconfirmed
 )
 
@@ -100,8 +101,8 @@ func sortScopes(scopes []activationScope) {
 type activeResult struct {
 	rows []activeRow // every activation the read did see.
 	errs []error     // contexts or scopes that failed outright, as opposed to timing out.
-	// unconfirmed holds the scope ids whose call missed the soft deadline. Their
-	// state is unknown, not empty — the difference matters, so they are named
+	// unconfirmed holds scopes whose call failed or missed the soft deadline.
+	// Their state is unknown, not empty — the difference matters, so they are named
 	// rather than silently under-reported.
 	unconfirmed []activationScope
 }
@@ -266,13 +267,13 @@ func scopeFanOutFor(scopes int) int {
 // scopeTally accumulates the fan-out's results and its timing figures. Every
 // field is guarded by mu: the per-scope calls all write into one tally.
 type scopeTally struct {
-	mu    sync.Mutex        // guards every field below.
-	rows  []activeRow       // activations found, before deduplication across nested scopes.
-	errs  []error           // scopes that answered with an error rather than late.
-	slow  []activationScope // scope ids that missed the deadline: unknown, not empty.
-	calls int               // per-scope calls made, for the --debug line.
-	maxD  time.Duration     // the slowest call, which is what sets the wall time.
-	sumD  time.Duration     // every call's duration added up, to show what concurrency bought.
+	mu     sync.Mutex        // guards every field below.
+	rows   []activeRow       // activations found, before deduplication across nested scopes.
+	errs   []error           // scopes that answered with an error rather than late.
+	unread []activationScope // scopes whose reads failed or missed their deadline: unknown, not empty.
+	calls  int               // per-scope calls made, for the --debug line.
+	maxD   time.Duration     // the slowest call, which is what sets the wall time.
+	sumD   time.Duration     // every call's duration added up, to show what concurrency bought.
 }
 
 // record folds one per-scope call's duration into the fan-out's figures, for
@@ -310,6 +311,7 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 	defer tally.mu.Unlock()
 	tally.record(d)
 	if err != nil {
+		tally.unread = append(tally.unread, activationScope{Context: s.Token.Label(), ID: scope})
 		// A scope that timed out, or that ARM is still throttling after the
 		// retries, is *unknown* — not empty. Naming it keeps the difference
 		// visible instead of quietly reporting fewer roles than are held.
@@ -318,7 +320,6 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 			// entries as well as printed, and labelling it here once made every
 			// row at an unread scope silently vanish. Presentation happens at
 			// the point of printing.
-			tally.slow = append(tally.slow, activationScope{Context: s.Token.Label(), ID: scope})
 			return
 		}
 		// One unreadable scope must not sink the rest: the user may simply have
@@ -350,29 +351,37 @@ func listActivations(
 	scopes []activationScope,
 ) (rows []activeRow, errs []error, unconfirmed []activationScope) {
 	if rc.AllScopes {
-		r, e := tenantWideActivations(ctx, rc)
-		return r, e, nil
+		return tenantWideActivations(ctx, rc)
 	}
 	var scopeErrs []error
 	if scopes == nil {
 		// The fan-out needs to know where to look. Eligibility is the cheap
 		// listing — well under a second even cold — so read it rather than
 		// falling back to the tenant-wide call that is known to drop rows.
-		scopes, scopeErrs = eligibleScopes(ctx, rc)
+		scopes, scopeErrs, unconfirmed = eligibleScopes(ctx, rc)
 	}
 	if len(scopes) == 0 {
 		if len(scopeErrs) > 0 {
 			// The eligibility read failed, so "no scopes" is not a fact about
 			// the tenant. Falling back here would answer with a listing known
 			// to be lossy instead of saying what went wrong.
-			return nil, scopeErrs, nil
+			return nil, scopeErrs, unconfirmed
 		}
 		// Eligible for nothing anywhere: the tenant-wide call is the only way
 		// left to notice an activation at a scope the listing cannot suggest.
-		r, e := tenantWideActivations(ctx, rc)
-		return r, e, nil
+		return tenantWideActivations(ctx, rc)
 	}
 
+	covered := map[string]bool{}
+	for _, scope := range scopes {
+		covered[scope.Context] = true
+	}
+	for _, s := range rc.Sessions {
+		if !covered[s.Token.Label()] {
+			unconfirmed = append(unconfirmed, activationScope{Context: s.Token.Label()})
+		}
+	}
+	scopes = withRecordedScopes(rc, scopes)
 	tally := &scopeTally{}
 	sem := make(chan struct{}, scopeFanOutFor(len(scopes)))
 	var wg sync.WaitGroup
@@ -400,8 +409,33 @@ func listActivations(
 
 	out := dedupeActivations(tally.rows)
 	sortActivations(out)
-	sortScopes(tally.slow)
-	return out, slices.Concat(scopeErrs, tally.errs), slices.Compact(tally.slow)
+	unconfirmed = append(unconfirmed, tally.unread...)
+	sortScopes(unconfirmed)
+	return out, slices.Concat(scopeErrs, tally.errs), slices.Compact(unconfirmed)
+}
+
+// withRecordedScopes includes scopes known only from the activation record.
+// Losing eligibility does not prove an activation ended. It reads local files,
+// learns display names and returns a sorted, deduplicated copy of scopes.
+func withRecordedScopes(rc *runContext, scopes []activationScope) []activationScope {
+	out := slices.Clone(scopes)
+	seen := map[string]bool{}
+	for _, scope := range out {
+		seen[scope.key()] = true
+	}
+	for _, s := range rc.Sessions {
+		for _, entry := range readRecord(s.owner()) {
+			scope := activationScope{Context: s.Token.Label(), ID: entry.Scope}
+			if entry.Scope == "" || seen[scope.key()] {
+				continue
+			}
+			seen[scope.key()] = true
+			rc.names.learn(entry.Scope, entry.ScopeName)
+			out = append(out, scope)
+		}
+	}
+	sortScopes(out)
+	return out
 }
 
 // dedupeActivations folds duplicates by ARM instance id: the same activation can be
@@ -432,8 +466,12 @@ func sortActivations(out []activeRow) {
 }
 
 // eligibleScopes returns the distinct scopes the user is eligible at, from the
-// cache when it is warm and from ARM when it is not.
-func eligibleScopes(ctx context.Context, rc *runContext) (scopes []activationScope, errs []error) {
+// cache when it is warm and from ARM when it is not. Errors are accompanied
+// by whole-context unknown markers so failed discovery cannot erase records.
+func eligibleScopes(
+	ctx context.Context,
+	rc *runContext,
+) (scopes []activationScope, errs []error, unknown []activationScope) {
 	add := func(label string, elig []armclient.Eligibility) {
 		for _, e := range elig {
 			rc.names.learn(e.Properties.Scope, e.ScopeName())
@@ -467,36 +505,40 @@ func eligibleScopes(ctx context.Context, rc *runContext) (scopes []activationSco
 			// even retried. The caller decides what to do; it must not read
 			// this as "eligible for nothing".
 			errs = append(errs, fmt.Errorf("listing eligible roles in %s: %w", label, err))
+			unknown = append(unknown, activationScope{Context: label})
 			continue
 		}
 		cache.Write(s.owner(), elig)
 		add(label, elig)
 	}
 	sortScopes(scopes)
-	return scopes, errs
+	return scopes, errs, unknown
 }
 
 // tenantWideActivations makes ARM's single roleAssignmentScheduleInstances call
 // per session instead of the per-scope fan-out. It is what --all-scopes asks
 // for, and the only way left to notice an activation when the eligibility
 // listing cannot suggest a scope to look at.
-func tenantWideActivations(ctx context.Context, rc *runContext) ([]activeRow, []error) {
+func tenantWideActivations(ctx context.Context, rc *runContext) ([]activeRow, []error, []activationScope) {
 	var out []activeRow
 	var errs []error
+	var unknown []activationScope
 	rc.Timings.TrackVoid("ARM roleAssignmentScheduleInstances (tenant-wide)", func() {
-		out, errs = listTenantWide(ctx, rc.Sessions)
+		out, errs, unknown = listTenantWide(ctx, rc.Sessions)
 	})
-	return out, errs
+	return out, errs, unknown
 }
 
 // listTenantWide is the call itself, once per session. As with
 // readEligibilities, a failing context does not discard the others' results.
-func listTenantWide(ctx context.Context, sessions []*session) ([]activeRow, []error) {
+// The third result marks every failed context as unread for reconciliation.
+func listTenantWide(ctx context.Context, sessions []*session) ([]activeRow, []error, []activationScope) {
 	var (
-		mu   sync.Mutex
-		out  []activeRow
-		errs []error
-		wg   sync.WaitGroup
+		mu      sync.Mutex
+		out     []activeRow
+		errs    []error
+		unknown []activationScope
+		wg      sync.WaitGroup
 	)
 	for _, s := range sessions {
 		wg.Add(1)
@@ -506,6 +548,7 @@ func listTenantWide(ctx context.Context, sessions []*session) ([]activeRow, []er
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("listing active roles in %s: %w", s.Token.Label(), err))
+				unknown = append(unknown, activationScope{Context: s.Token.Label()})
 				mu.Unlock()
 				return
 			}
@@ -518,7 +561,8 @@ func listTenantWide(ctx context.Context, sessions []*session) ([]activeRow, []er
 	}
 	wg.Wait()
 	sortActivations(out)
-	return out, errs
+	sortScopes(unknown)
+	return out, errs, unknown
 }
 
 // isThrottled reports whether ARM refused to answer rather than answering

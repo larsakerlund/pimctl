@@ -15,7 +15,7 @@ import (
 
 // target is one role pimctl will try to deactivate.
 //
-// SeenActive records whether the activation listing actually showed it. That
+// SeenActive records whether the listing or local record showed it held. That
 // distinction decides how RoleAssignmentDoesNotExist is read: for a role we
 // just saw active it means the assignment has not finished propagating and is
 // still held (a failure); for a role we are attempting speculatively it means
@@ -29,15 +29,16 @@ type target struct {
 	ScopeName        string     // scope display name, likewise.
 	ScopeType        string     // Subscription, ManagementGroup, ResourceGroup or Resource.
 	EndDateTime      *time.Time // when it would have expired anyway; nil when the listing did not show it.
-	// SeenActive records that the activation listing showed this role as held.
+	// SeenActive records listing or local-record evidence that this role is held.
 	// It decides what RoleAssignmentDoesNotExist means: for a role just seen
 	// active it is propagation, and a failure; for a speculative one it is the
 	// requested end state.
 	SeenActive bool
 }
 
-// targetFromActive is a target for a role the activation listing has just
-// shown, so it carries that row's session and window and sets SeenActive.
+// targetFromActive is a target for a role the listing or local record shows
+// as held, carrying its session and window. SeenActive keeps a conflicting
+// not-active response from silently claiming a recorded activation is gone.
 func targetFromActive(r activeRow) target {
 	return target{
 		Session:          r.Session,

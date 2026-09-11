@@ -222,3 +222,33 @@ func TestDedupeRows(t *testing.T) {
 		}
 	}
 }
+
+func TestContextCaseDoesNotMergeTenants(t *testing.T) {
+	elig := twoLowImpactRoles()[0]
+	rows := dedupeRows([]row{{Context: "Prod", Elig: elig}, {Context: "prod", Elig: elig}})
+	if len(rows) != 2 {
+		t.Fatalf("case-distinct context rows collapsed into %d row(s)", len(rows))
+	}
+}
+
+func TestContextCaseIsPreservedAcrossPresetsAndActivationMatching(t *testing.T) {
+	upper := mkRow("Prod", "Contributor", contribGUID, mgScope, "Production", "managementgroup")
+	lower := upper
+	lower.Context = "prod"
+	rows := []row{upper, lower}
+	selected, missing := applyPreset(rows, toPresetEntries([]row{upper}))
+	if len(missing) != 0 || len(selected) != 1 || selected[0].Context != "Prod" {
+		t.Fatalf("preset crossed contexts: %v / %v", selected, missing)
+	}
+	assignment := armclient.Assignment{}
+	assignment.Properties.AssignmentType = "Activated"
+	assignment.Properties.Scope = upper.Elig.Properties.Scope
+	assignment.Properties.RoleDefinitionID = upper.Elig.Properties.RoleDefinitionID
+	matched := matchActivations(rows, []activeRow{{Context: "Prod", Assignment: assignment}})
+	if !matched[0].IsActive() || matched[1].IsActive() {
+		t.Fatal("activation crossed contexts")
+	}
+	if upper.SelectionKey() == lower.SelectionKey() {
+		t.Fatal("case-distinct contexts share a selection key")
+	}
+}

@@ -174,7 +174,7 @@ func (rc *runContext) finish(cmd *cobra.Command) {
 // false statement about the tenant.
 func abortedEarly(ctx context.Context) bool { return ctx.Err() != nil }
 
-// reportUnconfirmedScopes names the scopes whose listing was cut short. Naming
+// reportUnconfirmedScopes names scopes whose listing failed or was cut short. Naming
 // them is the whole point: "N roles active" from an incomplete read would be a
 // quiet under-report, which for an access tool is worse than a slow answer.
 func reportUnconfirmedScopes(cmd *cobra.Command, rc *runContext, scopes []activationScope) {
@@ -183,7 +183,7 @@ func reportUnconfirmedScopes(cmd *cobra.Command, rc *runContext, scopes []activa
 	}
 	fmt.Fprintf(
 		cmd.ErrOrStderr(),
-		"%d scope(s) unconfirmed (slow ARM): %s — their last known state is kept; `pimctl status --wait` reads them properly\n",
+		"%d scope(s) unconfirmed (ARM did not answer): %s — their last known state is kept; `pimctl status --wait` reads them properly\n",
 		len(scopes),
 		strings.Join(labelScopes(rc, scopes), ", "),
 	)

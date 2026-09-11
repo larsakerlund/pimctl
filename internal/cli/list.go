@@ -15,14 +15,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
+	"github.com/larsakerlund/pimctl/internal/term"
 )
 
 // newListCmd builds `pimctl list` (alias `ls`).
 //
 // The eligibility listing is cached and cheap; the activation listing is the
 // per-scope fan-out that costs seconds, so the ACTIVE column is filled from
-// this machine's own record and the command says on stderr that it did.
-// --with-active waits for Azure's answer instead.
+// this machine's own record before reconciliation reports corrections on
+// stderr. --with-active waits for the merged answer before printing.
 func newListCmd(opts *globalOpts, d deps) *cobra.Command {
 	var withActive bool
 	cmd := &cobra.Command{
@@ -42,51 +43,80 @@ func newListCmd(opts *globalOpts, d deps) *cobra.Command {
 				return err
 			}
 			defer rc.finish(cmd)
-			rows, listErrs, future := readEligibilities(rc.Ctx, cmd, rc)
-			if abortedEarly(cmd.Context()) {
-				return cmd.Context().Err()
-			}
-			failures := slices.Concat(rc.Failures, listErrs)
-
-			// The eligibility list is already in hand; the activation listing
-			// is a per-scope fan-out that takes seconds. Do not hold the table
-			// hostage to it — fill ACTIVE from this machine's own record, which
-			// is free, and wait for Azure only when the caller asks.
-			res, ok := future.TryGet()
-			if withActive {
-				res, ok = future.Wait(-1)
-			}
-			if ok {
-				failures = append(failures, res.errs...)
-				rows = applyActive(rows, res.rows)
-				reportUnconfirmedScopes(cmd, rc, res.unconfirmed)
-			} else {
-				rows = applyLocalRecord(rows, rc)
-			}
-			reportContextFailures(cmd.ErrOrStderr(), failures)
-			if !ok {
-				fmt.Fprintln(
-					cmd.ErrOrStderr(),
-					"ACTIVE shows this machine's own record; run `pimctl status`, or `pimctl ls --with-active`, for Azure's answer",
-				)
-			}
-
-			if opts.json() {
-				if err := printRowsJSON(cmd, rows); err != nil {
-					return err
-				}
-			} else {
-				printRowsTable(cmd, rows)
-			}
-			if len(failures) > 0 {
-				return partialFailureError(failures)
-			}
-			return nil
+			return runList(cmd, rc, withActive)
 		},
 	}
 	cmd.Flags().
 		BoolVar(&withActive, "with-active", false, "wait for the (slow) activation listing so the ACTIVE column is filled in")
 	return cmd
+}
+
+// runList prints eligible roles and reconciles their activation state. The
+// ordinary path prints local evidence before waiting on ARM; --with-active
+// prints only after merging ARM and local evidence. Background failures are
+// returned after output, and every network wait has a terminal spinner.
+func runList(cmd *cobra.Command, rc *runContext, withActive bool) error {
+	rows, listErrs, future := readEligibilities(rc.Ctx, cmd, rc)
+	if abortedEarly(rc.Ctx) {
+		return rc.Ctx.Err()
+	}
+	failures := slices.Concat(rc.Failures, listErrs)
+	local := readLocalRecord(rc)
+	if !withActive {
+		rows = applyLocalRecord(rows, rc)
+		fmt.Fprintln(
+			cmd.ErrOrStderr(),
+			"ACTIVE shows this machine's own record; reconciling against Azure — use --with-active to wait before printing",
+		)
+		if err := printList(cmd, rows, rc.Opts.json()); err != nil {
+			return err
+		}
+	}
+	sp := term.NewSpinner(cmd.ErrOrStderr(), "confirming active roles…")
+	res, _ := future.Wait(-1)
+	active := reconcileActive(rc, &local, res)
+	sp.Stop()
+	if abortedEarly(rc.Ctx) {
+		return rc.Ctx.Err()
+	}
+	if withActive {
+		rows = applyActivationView(rows, active, res.unconfirmed)
+		if err := printList(cmd, rows, rc.Opts.json()); err != nil {
+			return err
+		}
+		reportUnconfirmedScopes(cmd, rc, res.unconfirmed)
+		reportRecordDrops(cmd, local, res.rows, res.unconfirmed)
+	} else {
+		reportStatusDelta(cmd, rc, local, res.rows, res.unconfirmed)
+	}
+	failures = append(failures, res.errs...)
+	reportContextFailures(cmd.ErrOrStderr(), failures)
+	if len(failures) > 0 {
+		return partialFailureError(failures)
+	}
+	return nil
+}
+
+// printList writes the selected output format, returning JSON encoding errors.
+func printList(cmd *cobra.Command, rows []row, asJSON bool) error {
+	if asJSON {
+		return printRowsJSON(cmd, rows)
+	}
+	printRowsTable(cmd, rows)
+	return nil
+}
+
+// applyActivationView marks both held roles and empty rows at unread scopes
+// with their confidence. An unanswered scope cannot prove a role inactive.
+func applyActivationView(rows []row, active []activeRow, unconfirmed []activationScope) []row {
+	unknown := unreadScopes(unconfirmed)
+	for i := range rows {
+		rows[i].ActiveState = RowConfirmed
+		if scopeIsUnread(unknown, rows[i].Context, rows[i].Elig.Properties.Scope) {
+			rows[i].ActiveState = RowUnconfirmed
+		}
+	}
+	return applyActive(rows, active)
 }
 
 // rowJSON is one eligible role as `pimctl list -o json` emits it. The field
@@ -126,6 +156,10 @@ type rowJSON struct {
 	// Active comes from this machine's own record unless --with-active was
 	// given, so it can be stale for a role activated elsewhere.
 	Active bool `json:"active"`
+	// Confirmed distinguishes Azure's answer from local evidence, including
+	// rows with Active false whose scope was not read.
+	Confirmed bool   `json:"confirmed"`
+	State     string `json:"state"` // confirmed, confirming or unconfirmed, as in status.
 	// Until is the end of the current activation, named the same here as in
 	// status, up and down so one jq expression works across all four.
 	Until *time.Time `json:"until,omitempty"`
@@ -155,6 +189,8 @@ func toRowJSON(rows []row) []rowJSON {
 			Key:                       r.SelectionKey(),
 			AlsoVia:                   r.AlsoVia,
 			Active:                    r.IsActive(),
+			Confirmed:                 r.ActiveState == RowConfirmed,
+			State:                     r.ActiveState.String(),
 			Until:                     r.ActiveUntil(),
 		})
 	}
@@ -208,6 +244,7 @@ func printRowsTable(cmd *cobra.Command, rows []row) {
 				active = "until " + until.Local().Format(timeFormat)
 			}
 		}
+		active = strings.TrimSpace(active + " " + r.ActiveState.marker())
 		fields := []string{
 			strconv.Itoa(i + 1),
 			r.SelectionKey(),
@@ -223,6 +260,15 @@ func printRowsTable(cmd *cobra.Command, rows []row) {
 	}
 	w.Flush()
 	fmt.Fprintf(out, "\n%d eligible role(s).\n", len(rows))
+	if slices.ContainsFunc(rows, func(r row) bool { return r.ActiveState == RowUnconfirmed }) {
+		fmt.Fprintln(
+			out,
+			"? = activation state is unconfirmed; absence from the local record does not prove inactivity.",
+		)
+	}
+	if slices.ContainsFunc(rows, func(r row) bool { return r.ActiveState == RowConfirming }) {
+		fmt.Fprintln(out, "~ = activated here; Azure's listing has yet to catch up.")
+	}
 }
 
 // applyLocalRecord marks rows this machine believes it activated, so the ACTIVE
@@ -230,8 +276,8 @@ func printRowsTable(cmd *cobra.Command, rows []row) {
 // `--with-active` reconcile.
 func applyLocalRecord(rows []row, rc *runContext) []row {
 	local := localActiveRows(rc)
-	if len(local) == 0 {
-		return rows
+	for i := range rows {
+		rows[i].ActiveState = RowUnconfirmed
 	}
 	return applyActive(rows, local)
 }

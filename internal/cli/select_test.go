@@ -180,3 +180,21 @@ func TestFilterRows(t *testing.T) {
 		t.Error("an empty filter set must match every row")
 	}
 }
+
+func TestLegacySelectionKeysRejectContextAmbiguity(t *testing.T) {
+	upper := mkRow("Prod", "Contributor", contribGUID, mgScope, "Production", "managementgroup")
+	lower := upper
+	lower.Context = "prod"
+	legacy := lower.SelectionKey()
+	selected, err := selectByKeys([]row{upper}, []string{legacy})
+	if err != nil || len(selected) != 1 || selected[0].Context != "Prod" {
+		t.Fatalf("unambiguous legacy key failed: %v", err)
+	}
+	if _, err = selectByKeys([]row{upper, lower}, []string{legacy}); err == nil {
+		t.Fatal("legacy key silently crossed case-distinct contexts")
+	}
+	selected, err = selectByKeys([]row{upper, lower}, []string{upper.SelectionKey()})
+	if err != nil || len(selected) != 1 || selected[0].Context != "Prod" {
+		t.Fatalf("current key failed: %v", err)
+	}
+}

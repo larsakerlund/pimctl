@@ -225,6 +225,9 @@ func readOwnedRecordFile(path string, owner *store.Owner) []recordEntry {
 	live := make([]recordEntry, 0, len(f.Entries))
 	for _, e := range f.Entries {
 		if !e.stale(now) {
+			// Rebuild derived keys so older case-folded context keys cannot
+			// change the identity of an account-owned record.
+			e.Key = recordKey(e.Context, e.Scope, e.RoleDefinitionID)
 			live = append(live, e)
 		}
 	}

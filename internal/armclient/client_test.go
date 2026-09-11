@@ -677,3 +677,51 @@ func TestPollReturnsImmediatelyWhenThePutIsAlreadyTerminal(t *testing.T) {
 		t.Errorf("waited %v on an already-terminal request", elapsed)
 	}
 }
+
+func TestPollDeadlineBoundsSleepRequestsAndRetryAfter(t *testing.T) {
+	for _, mode := range []string{"sleep", "request", "retry"} {
+		t.Run(mode, func(t *testing.T) {
+			if mode != "sleep" {
+				fastPolling(t)
+			}
+			var calls atomic.Int32
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if mode == "request" {
+					<-r.Context().Done()
+					return
+				}
+				w.Header().Set("Retry-After", "3600")
+				w.WriteHeader(http.StatusTooManyRequests)
+			})
+			sr := &ScheduleRequest{ID: "/req/1", Properties: ScheduleRequestProperties{Status: "Accepted"}}
+			start := time.Now()
+			got, err := c.Poll(context.Background(), sr, 50*time.Millisecond)
+			if err != nil || got != sr {
+				t.Fatalf("budget exhaustion must return last request without interruption: %v, %v", got, err)
+			}
+			if time.Since(start) > time.Second {
+				t.Fatal("poll budget did not bound network and retry waits")
+			}
+			wantCalls := int32(1)
+			if mode == "sleep" {
+				wantCalls = 0
+			}
+			if calls.Load() != wantCalls {
+				t.Fatalf("made %d calls, want %d", calls.Load(), wantCalls)
+			}
+		})
+	}
+}
+
+func TestPollPreservesCallerCancellation(t *testing.T) {
+	fastPolling(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newTestClient(t, func(_ http.ResponseWriter, r *http.Request) { cancel(); <-r.Context().Done() })
+	sr := &ScheduleRequest{ID: "/req/1", Properties: ScheduleRequestProperties{Status: "Accepted"}}
+	got, err := c.Poll(ctx, sr, time.Second)
+	if got != sr || !errors.Is(err, context.Canceled) {
+		t.Fatalf("caller cancellation became normal timeout: %v", err)
+	}
+}

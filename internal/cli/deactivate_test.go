@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -355,5 +356,44 @@ func TestEmptyListingPrintsTheCaveat(t *testing.T) {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("the caveat should mention %q: %q", want, errOut)
 		}
+	}
+}
+
+func TestDownIncludesRecordedActivations(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%t", partial), func(t *testing.T) {
+			elig := twoLowImpactRoles()
+			f := &fakeARM{t: t, eligibilities: elig}
+			if partial {
+				a := armclient.Assignment{ID: "/listed"}
+				a.Properties.AssignmentType = "Activated"
+				a.Properties.Scope = elig[1].Properties.Scope
+				a.Properties.RoleDefinitionID = elig[1].Properties.RoleDefinitionID
+				a.Properties.ExpandedProperties = elig[1].Properties.ExpandedProperties
+				f.activated = []armclient.Assignment{a}
+			}
+			f.install()
+			entry := mkRecordEntry("Contributor", "contoso-prod", time.Hour)
+			entry.Start = time.Now().Add(-10 * time.Minute)
+			entry.WrittenAt = entry.Start
+			entry.Listed = true
+			writeRecord(testOwner("contoso"), []recordEntry{entry})
+			out, stderr, err := runCmd(t, "down", "-c", "contoso", "-y")
+			if err != nil {
+				t.Fatalf("down: %v; %s; %s", err, out, stderr)
+			}
+			want := 1
+			if partial {
+				want = 2
+			}
+			if len(f.putBodies()) != want {
+				t.Fatalf("made %d deactivation requests, want %d", len(f.putBodies()), want)
+			}
+			for _, held := range readRecord(testOwner("contoso")) {
+				if !held.Revoked() {
+					t.Errorf("recorded role was not deactivated: %s", held.Role)
+				}
+			}
+		})
 	}
 }

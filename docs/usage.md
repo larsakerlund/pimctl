@@ -17,7 +17,7 @@ use, and the full list of messages you might have to act on.
 | `pimctl version` | the release tag, or the commit for a local build |
 
 `up` and `ls` are the everyday spellings of `activate` and `list`. With no
-selection, `down` selects all listed active roles and asks for confirmation;
+selection, `down` selects listed and locally recorded active roles and asks for confirmation;
 `deactivate` opens a picker instead.
 
 ## Selecting roles
@@ -42,6 +42,10 @@ role's own policy maximum, which differs per role *and* per scope; `--for` is a
 cap, not a target, and pimctl reports the clamp. An unattended run refuses more
 than ten roles without `--force`.
 
+Context names are case-sensitive. Selection keys printed by older versions
+remain accepted when they identify only one role; an ambiguous old key is
+refused. Narrow the context with `-c` or use the current key from `ls`.
+
 ## Presets
 
 ```sh
@@ -59,6 +63,13 @@ preset survives an access review.
 `scopeName`, `scopeLabel` (the scope as the tables print it), `scopeType`,
 `since`/`until` for an activation window, and `eligibleUntil` for when the
 *eligibility* lapses.
+
+`ls` prints local activation state immediately, then reconciles against Azure
+and reports corrections on stderr. Use `ls --with-active` to wait for the merged
+answer before printing. Its JSON rows include `confirmed` and `state`, matching
+the confidence fields in `status`. An `active: false` row with `confirmed: false`
+does not prove the role is inactive. The table uses `?` for unconfirmed state and
+`~` for a local activation awaiting listing confirmation.
 
 ```console
 $ pimctl status -o json | jq '{unconfirmed: .unconfirmedScopes, held: [.roles[] | {key, role, until, state}]}'
@@ -167,7 +178,7 @@ spawns cloudctx and is unaffected.
 | `requires ticket information` | re-run with `--ticket-number` and `--ticket-system` |
 | `at least 5 minutes` | PIM will not deactivate a role activated less than five minutes ago |
 | `not finished propagating` | the role is **still active**; wait a minute and retry the deactivation |
-| `N scope(s) unconfirmed (slow ARM)` | the listing is incomplete, not empty — `pimctl status --wait` allows longer reads but can still return incomplete results |
+| `N scope(s) unconfirmed (ARM did not answer)` | the listing is incomplete, not empty — failed reads preserve local records; `pimctl status --wait` allows longer reads but can still return incomplete results |
 | `status` shows nothing you believe you hold | deactivate it **by name**; a named `down` asks ARM regardless of the listing |
 
 Longer explanations, and the measurements behind these behaviours, are in

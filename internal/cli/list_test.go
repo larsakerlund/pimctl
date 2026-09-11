@@ -10,12 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
-	"github.com/larsakerlund/pimctl/internal/azauth"
 	"github.com/larsakerlund/pimctl/internal/cache"
 )
 
@@ -173,25 +172,7 @@ func TestCacheServesTheSecondListAndRefreshBypassesIt(t *testing.T) {
 // eligible-role table appears immediately, without waiting for the per-scope
 // activation fan-out at all.
 func TestListDoesNotBlockOnTheActiveListing(t *testing.T) {
-	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles(), activeDelay: 5 * time.Second}
-	f.install()
-
-	start := time.Now()
-	out, errOut, err := runCmd(t, "list", "-c", "contoso")
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("list waited %v; it must not block on the activation listing", elapsed)
-	}
-	if !strings.Contains(out, "Cost Management Contributor") {
-		t.Errorf("the eligible roles should still be shown:\n%s", out)
-	}
-	if !strings.Contains(errOut, "this machine's own record") ||
-		!strings.Contains(errOut, "--with-active") {
-		t.Errorf("the user must be told where ACTIVE came from: %q", errOut)
-	}
+	assertListPrintsBeforeARM(t, false)
 }
 
 // TestListWithActiveWaits: --with-active opts back into the wait.
@@ -247,58 +228,158 @@ func TestInterruptedListSaysNothingAboutTheTenant(t *testing.T) {
 // indefinitely, so any network dependency on the critical path hangs the test
 // rather than merely slowing it.
 func TestListFromCacheProducesOutputBeforeAnyNetworkCall(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv(envContext, "")
-	installFakeRunner(t, []string{"contoso"})
+	assertListPrintsBeforeARM(t, true)
+}
 
-	// Warm the eligibility cache directly: this is the state after any earlier
-	// command in the same ten minutes.
-	cache.Write(testOwner("contoso"), twoLowImpactRoles())
+// listOutput signals when the complete initial table has reached stdout.
+// Its buffer is read only after the command has finished.
+type listOutput struct {
+	bytes.Buffer
 
-	blocked := make(chan struct{})
-	t.Cleanup(func() { close(blocked) })
-	var reached atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		reached.Store(true)
+	printed chan struct{}
+	once    sync.Once
+}
+
+func (w *listOutput) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if strings.Contains(w.String(), "2 eligible role(s).") {
+		w.once.Do(func() { close(w.printed) })
+	}
+	return n, err
+}
+
+func assertListPrintsBeforeARM(t *testing.T, cached bool) {
+	t.Helper()
+	elig := twoLowImpactRoles()
+	a := armclient.Assignment{ID: "/portal-activation"}
+	a.Properties.AssignmentType = "Activated"
+	a.Properties.Scope = elig[0].Properties.Scope
+	a.Properties.RoleDefinitionID = elig[0].Properties.RoleDefinitionID
+	a.Properties.ExpandedProperties = elig[0].Properties.ExpandedProperties
+	end := time.Now().Add(time.Hour)
+	a.Properties.EndDateTime = &end
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/roleEligibilityScheduleInstances") {
+			if cached {
+				t.Error("a warm list fetched eligibility")
+			}
+			writeJSON(t, w, map[string]any{"value": elig})
+			return
+		}
 		select {
-		case <-blocked:
+		case <-release:
+			writeJSON(t, w, map[string]any{"value": []armclient.Assignment{a}})
 		case <-r.Context().Done():
 		}
 	}))
 	t.Cleanup(srv.Close)
-
-	installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
-		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid-1", TenantID: "tid-1"}
-		return []*session{{
-			Context: "contoso", Token: tok,
-			Client: armclient.New(srv.URL, tok.AccessToken, srv.Client()),
-		}}, nil, nil
-	})
-
-	done := make(chan string, 1)
+	installStatusFake(t, srv)
+	if cached {
+		cache.Write(testOwner("contoso"), elig)
+	}
+	root := newRootCmd(testDeps())
+	out := &listOutput{printed: make(chan struct{})}
+	var stderr bytes.Buffer
+	root.SetOut(out)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"list", "-c", "contoso"})
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	var runErr error
 	go func() {
-		// The error is irrelevant here: the test is about *when* stdout
-		// appears, not whether the background listing eventually failed.
-		out, _, runErr := runCmd(t, "list", "-c", "contoso")
-		if runErr != nil {
-			t.Logf("list returned %v (expected: the background listing never completes)", runErr)
-		}
-		done <- out
+		defer close(finished)
+		runErr = root.ExecuteContext(ctx)
 	}()
-
+	t.Cleanup(func() { cancel(); <-finished })
 	select {
-	case out := <-done:
-		if !strings.Contains(out, "Cost Management Contributor") {
-			t.Errorf("list printed no roles:\n%s", out)
-		}
-		if !strings.Contains(out, "2 eligible role(s).") {
-			t.Errorf("list output:\n%s", out)
-		}
+	case <-out.printed:
+	case <-time.After(time.Second):
+		t.Fatal("list waited for ARM before printing its initial table")
+	}
+	select {
+	case <-finished:
+		t.Fatal("list abandoned reconciliation after printing")
+	default:
+	}
+	close(release)
+	select {
+	case <-finished:
 	case <-time.After(3 * time.Second):
-		t.Fatal(
-			"list did not produce output while ARM was unreachable — something on the warm path still waits for the network",
-		)
+		t.Fatal("list did not complete reconciliation after ARM answered")
+	}
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	assertListReconciled(t, out.String(), stderr.String())
+}
+
+func TestListRespectsDeactivationTombstone(t *testing.T) {
+	entry := mkRecordEntry("Contributor", "contoso-prod", time.Hour)
+	entry.Start = time.Now().Add(-time.Hour)
+	stale := recordRow("contoso", nil, entry).Assignment
+	stale.ID = "/stale-instance"
+	elig := mkElig("Contributor", contribGUID, entry.Scope, entry.ScopeName, "managementgroup")
+	f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}, activated: []armclient.Assignment{stale}}
+	f.install()
+	entry.Status = recordRevoked
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
+	out, _, err := runCmd(t, "list", "-c", "contoso", "--with-active", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []rowJSON
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Active {
+		t.Fatalf("list resurrected deactivated role: %s", out)
+	}
+}
+
+func assertListReconciled(t *testing.T, output, notices string) {
+	t.Helper()
+	if !strings.Contains(output, "?") {
+		t.Errorf("local state lacks a confidence marker: %s", output)
+	}
+	if !strings.Contains(notices, "activated elsewhere") {
+		t.Errorf("missing correction: %s", notices)
+	}
+	if len(readRecord(testOwner("contoso"))) != 1 {
+		t.Error("list did not persist Azure's activation")
+	}
+}
+
+func TestListKeepsRecordedRoleAtUnreadScope(t *testing.T) {
+	srv := statusFake(t, "contoso-slow", false)
+	installStatusFake(t, srv)
+	shortDeadlines(t, 25*time.Millisecond)
+	entry := mkRecordEntry("Owner", "contoso-slow", time.Hour)
+	entry.RoleDefinitionID = "/providers/Microsoft.Authorization/roleDefinitions/8e3af657"
+	entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
+	entry.Listed = true
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
+	out, stderr, err := runCmd(t, "list", "-c", "contoso", "--with-active", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []rowJSON
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range rows {
+		if r.Scope == entry.Scope {
+			found = true
+			if !r.Active || r.Confirmed || r.State != "unconfirmed" {
+				t.Fatalf("unread role lost its uncertainty: %+v", r)
+			}
+		}
+	}
+	if !found || !strings.Contains(stderr, "contoso-slow") {
+		t.Fatalf("unread scope missing: %s / %s", out, stderr)
+	}
+	if len(readRecord(testOwner("contoso"))) != 1 {
+		t.Fatal("unread role was removed from the record")
 	}
 }

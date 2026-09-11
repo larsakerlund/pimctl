@@ -53,13 +53,15 @@ func New(host, token string, hc *http.Client) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: DefaultHTTPTimeout}
 	}
-	return &Client{
+	c := &Client{
 		Host:        strings.TrimSuffix(host, "/"),
 		HTTP:        hc,
 		MaxRetries:  DefaultMaxRetries,
 		token:       token,
 		policyCache: map[string]*RoleSettings{},
 	}
+	c.HTTP = c.guardedHTTPClient(hc)
+	return c
 }
 
 // DefaultMaxRetries is what [New] puts in [Client.MaxRetries]: four attempts
@@ -140,6 +142,9 @@ func (c *Client) doOnce(ctx context.Context, method, rawURL string, body any) ([
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, rdr)
 	if err != nil {
 		return nil, nil, err
+	}
+	if destinationErr := c.validateDestination(req.URL); destinationErr != nil {
+		return nil, nil, destinationErr
 	}
 	req.Header.Set("Authorization", "Bearer "+c.bearer())
 	req.Header.Set("Accept", "application/json")
@@ -526,8 +531,10 @@ func pollWait(attempt int) time.Duration {
 }
 
 // Poll re-reads a schedule request until it reaches a terminal status or the
-// timeout expires. The last observed request is always returned, even on
-// timeout, so the caller can report "still <status>".
+// timeout expires, bounding poll sleeps, HTTP requests and retry delays together.
+// The last observed request is always returned, even on timeout, so the caller
+// can report "still <status>". Own-budget exhaustion returns no error; cancellation
+// of ctx returns its error, preserving the distinction from user interruption.
 func (c *Client) Poll(ctx context.Context, sr *ScheduleRequest, timeout time.Duration) (*ScheduleRequest, error) {
 	if sr == nil {
 		return nil, errors.New("nothing to poll")
@@ -536,17 +543,20 @@ func (c *Client) Poll(ctx context.Context, sr *ScheduleRequest, timeout time.Dur
 	if IsTerminalStatus(last.Properties.Status) {
 		return last, nil
 	}
-	deadline := time.Now().Add(timeout)
+	pollCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for attempt := 0; ; attempt++ {
-		if time.Now().After(deadline) {
-			return last, nil
-		}
 		select {
-		case <-ctx.Done():
+		case <-pollCtx.Done():
 			return last, ctx.Err()
 		case <-time.After(pollWait(attempt)):
 		}
-		next, err := c.GetRequest(ctx, last.ID)
+		next, err := c.GetRequest(pollCtx, last.ID)
+		if pollCtx.Err() != nil {
+			// Exhausting our own budget is an unfinished request, not an
+			// interruption. Only the caller's cancellation returns an error.
+			return last, ctx.Err()
+		}
 		if err != nil {
 			return last, err
 		}

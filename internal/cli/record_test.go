@@ -449,3 +449,17 @@ func TestRecordLivesInTheContextStore(t *testing.T) {
 		t.Errorf("the bare record moved to %q; it has no context to move into", bare)
 	}
 }
+
+func TestRecordRebuildsLegacyContextFoldedKey(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	installFakeRunner(t, []string{"Prod"})
+	entry := mkRecordEntry("Contributor", "contoso-prod", time.Hour)
+	entry.Context = "Prod"
+	entry.Key = strings.ToLower(recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID))
+	owner := testOwner("Prod")
+	writeRecord(owner, []recordEntry{entry})
+	entries := readRecord(owner)
+	if len(entries) != 1 || entries[0].Key != recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID) {
+		t.Fatalf("legacy key was not normalised: %+v", entries)
+	}
+}

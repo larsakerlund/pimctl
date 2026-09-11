@@ -27,7 +27,8 @@ type row struct {
 	// row renders.
 	Elig armclient.Eligibility
 	// Active is the live activation for this scope+role, or nil.
-	Active *armclient.Assignment
+	Active      *armclient.Assignment
+	ActiveState rowState // confidence in the activation state, including an absent activation.
 	// AlsoVia lists the member types of duplicate eligibilities folded into
 	// this row by DedupeRows, e.g. the group grant behind a direct one.
 	AlsoVia []string
@@ -40,11 +41,11 @@ func (r row) Key() string {
 }
 
 // rowKey is the matching identity behind [row.Key] and [SelectionKeyFor]:
-// context, scope and role definition GUID, lower-cased because ARM does not
-// promise the case of a scope id. A caller already working inside one context
-// passes an empty context, as [matchActivations] does.
+// context, scope and role definition GUID. Context names remain case-sensitive;
+// only the Azure scope and role GUID are folded because ARM does not promise
+// their case.
 func rowKey(context, scope, roleGUID string) string {
-	return strings.ToLower(context + "|" + scope + "|" + roleGUID)
+	return context + "|" + strings.ToLower(scope) + "|" + strings.ToLower(roleGUID)
 }
 
 // SelectionKey is a short, stable identifier for one eligible role, safe to put
@@ -90,18 +91,20 @@ func (r row) ActiveUntil() *time.Time {
 
 // matchActivations attaches the live activation (if any) to each eligible row.
 func matchActivations(rows []row, active []activeRow) []row {
-	byKey := map[string]*armclient.Assignment{}
+	byKey := map[string]*activeRow{}
 	for i := range active {
 		a := &active[i].Assignment
 		if !a.IsActivated() {
 			continue
 		}
-		byKey[rowKey(active[i].Context, a.Properties.Scope, a.RoleDefinitionGUID())] = a
+		byKey[rowKey(active[i].Context, a.Properties.Scope, a.RoleDefinitionGUID())] = &active[i]
 	}
 	for i := range rows {
 		k := rows[i].Key()
+		rows[i].Active = nil
 		if a, ok := byKey[k]; ok {
-			rows[i].Active = a
+			rows[i].Active = &a.Assignment
+			rows[i].ActiveState = a.State
 		}
 	}
 	return rows

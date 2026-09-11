@@ -99,12 +99,8 @@ func runStatus(cmd *cobra.Command, rc *runContext, fast, wait bool) ([]activeRow
 		local := readLocalRecord(rc)
 		sp := term.NewSpinner(cmd.ErrOrStderr(), "reading active roles…")
 		active, listErrs, slow := listActivations(rc.Ctx, rc, nil)
+		merged := reconcileActive(rc, &local, activeResult{rows: active, unconfirmed: slow})
 		sp.Stop()
-		local.verdicts = verifyConfirming(rc.Ctx, rc, active, slow)
-		merged := mergeActive(local, active, slow)
-		for _, s := range rc.Sessions {
-			reconcileRecord(s.owner(), active, slow, local.verdicts)
-		}
 		printStatus(cmd, rc, merged, slow)
 		reportUnconfirmedScopes(cmd, rc, slow)
 		reportRecordDrops(cmd, local, active, slow)
@@ -117,15 +113,14 @@ func runStatus(cmd *cobra.Command, rc *runContext, fast, wait bool) ([]activeRow
 	// Reconcile in the background and report only the difference, so the fast
 	// answer is never silently wrong.
 	future := startActivationListing(rc.Ctx, rc, nil)
+	sp := term.NewSpinner(cmd.ErrOrStderr(), "confirming active roles…")
+	defer sp.Stop()
 	res, ok := future.Wait(-1)
 	if !ok {
 		return local.rows, res.errs
 	}
-	local.verdicts = verifyConfirming(rc.Ctx, rc, res.rows, res.unconfirmed)
-	merged := mergeActive(local, res.rows, res.unconfirmed)
-	for _, s := range rc.Sessions {
-		reconcileRecord(s.owner(), res.rows, res.unconfirmed, local.verdicts)
-	}
+	merged := reconcileActive(rc, &local, res)
+	sp.Stop()
 	reportStatusDelta(cmd, rc, local, res.rows, res.unconfirmed)
 	return merged, res.errs
 }

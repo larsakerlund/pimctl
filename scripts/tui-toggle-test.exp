@@ -15,6 +15,10 @@
 
 set bin [lindex $argv 0]
 set timeout 20
+# The harness checks timeout failures with a silent probe and a shorter budget.
+if {[info exists env(PIMCTL_TUI_TIMEOUT)]} {
+    set timeout $env(PIMCTL_TUI_TIMEOUT)
+}
 set env(TERM) "xterm-256color"
 set stty_init "rows 40 columns 120"
 
@@ -26,25 +30,42 @@ proc fail {msg} {
 puts "\n=== Tab toggles exactly the row under the cursor ==="
 spawn -noecho $bin select
 
-expect { "PROBE_ROWS=20" {} timeout { fail "probe never started" } }
+expect {
+    "PROBE_ROWS=20" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "probe never started" }
+}
 expect {
     -re "Key Vault Administrator @ Contoso landing zones \\(contoso-prod\\)" {}
+    eof { fail "probe exited before the expected output" }
     timeout { fail "the list never rendered" }
 }
 
 send -- "cost"
-expect { -re "2 of 20 shown" {} timeout { fail "filter did not narrow" } }
+expect {
+    -re "2 of 20 shown" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "filter did not narrow" }
+}
 
 # Toggle the highlighted row.
 send -- "\t"
-expect { -re "1 selected" {} timeout { fail "tab did not toggle the highlighted row" } }
+expect {
+    -re "1 selected" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "tab did not toggle the highlighted row" }
+}
 puts "\n>>> CHECK 1 PASS: tab selected exactly one row"
 
 # Change the filter so the selected row is no longer shown; the selection must
 # survive. Esc clears the filter in one keystroke — sending four backspaces in
 # one burst outruns the redraws and the child never sees the later ones.
 send -- "\033"
-expect { -re "20 of 20 shown" {} timeout { fail "esc did not clear the filter" } }
+expect {
+    -re "20 of 20 shown" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "esc did not clear the filter" }
+}
 puts "\n>>> CHECK 2 PASS: esc cleared the filter without dropping the selection"
 # "vault" matches the three Key Vault Administrator rows and nothing the
 # selection touched. ("owner" would match Storage Blob Data Owner too.)
@@ -54,6 +75,7 @@ send -- "vault"
 expect {
     -re "1 selected . 3 of 20 shown" {}
     -re "0 selected . 3 of 20 shown" { fail "the selection was lost when the filter changed" }
+    eof { fail "probe exited before the expected output" }
     timeout { fail "filter 'vault' did not narrow to 3 with the selection intact" }
 }
 puts "\n>>> CHECK 3 PASS: the selection survived the filter changing under it"
@@ -65,6 +87,7 @@ send -- "\r"
 # of a list nobody can interact with any more.
 expect {
     -re "Selected 1 role" {}
+    eof { fail "probe exited before the expected output" }
     timeout { fail "the erased picker left no 'Selected N roles' line behind" }
 }
 puts "\n>>> CHECK 4 PASS: the picker erased itself and left a one-line summary"
@@ -75,6 +98,7 @@ expect {
     -re "PROBE_SELECTED_COUNT=(\[0-9\]+)" {
         fail "tab toggled $expect_out(1,string) rows, want 1"
     }
+    eof { fail "probe exited before the expected output" }
     timeout { fail "never reported a selection count" }
 }
 puts "\n>>> CHECK 5 PASS: exactly one row was confirmed, though hidden by the final filter"
@@ -84,10 +108,15 @@ expect {
         puts "\n>>> CHECK 6 PASS: the confirmed row is Cost Management Contributor @ $expect_out(1,string)"
     }
     -re "PROBE_SELECTED=(\[^\r\n\]+)" { fail "the wrong row was confirmed: $expect_out(1,string)" }
+    eof { fail "probe exited before the expected output" }
     timeout { fail "no selected row reported" }
 }
 
-expect { "PROBE_DONE" {} timeout { fail "probe did not finish" } }
+expect {
+    "PROBE_DONE" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "probe did not finish" }
+}
 
 puts "\n=== TOGGLE-IN-FILTER: PASSED ==="
 exit 0

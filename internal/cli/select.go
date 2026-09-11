@@ -80,7 +80,7 @@ func selectByKeys(rows []row, keys []string) ([]row, error) {
 		}
 		var hits []row
 		for _, r := range rows {
-			if strings.HasPrefix(r.SelectionKey(), k) {
+			if matchesSelectionKey(r, k) {
 				hits = append(hits, r)
 			}
 		}
@@ -136,4 +136,12 @@ func matchAny(value string, filters []string) bool {
 		}
 	}
 	return false
+}
+
+// matchesSelectionKey accepts current keys and the legacy context-folded keys
+// printed by older releases. selectByKeys considers both together so a legacy
+// alias can never silently select one of two case-distinct contexts.
+func matchesSelectionKey(r row, prefix string) bool {
+	legacy := selectionKeyFor(strings.ToLower(r.Context), r.Elig.Properties.Scope, r.Elig.RoleDefinitionGUID())
+	return strings.HasPrefix(r.SelectionKey(), prefix) || strings.HasPrefix(legacy, prefix)
 }

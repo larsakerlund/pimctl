@@ -42,6 +42,10 @@ command.
 Tokens are never logged. `--debug` reports only `cache hit` or `cache miss`, and
 every URL in an error has its query string stripped before it is printed.
 
+Authenticated requests, pagination links and redirects are constrained to the
+configured ARM origin: scheme, hostname and effective port must match. A link
+to another host or an HTTP downgrade is rejected before sending the token.
+
 ## Reducing what is kept
 
 - `pimctl cache clear` deletes the tokens, listings and policies. It leaves the

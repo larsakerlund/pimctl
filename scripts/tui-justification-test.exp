@@ -13,6 +13,10 @@
 
 set bin [lindex $argv 0]
 set timeout 20
+# The harness checks timeout failures with a silent probe and a shorter budget.
+if {[info exists env(PIMCTL_TUI_TIMEOUT)]} {
+    set timeout $env(PIMCTL_TUI_TIMEOUT)
+}
 set env(TERM) "xterm-256color"
 set stty_init "rows 24 columns 120"
 
@@ -30,12 +34,14 @@ expect {
             fail "probe received the prefill as '$expect_out(1,string)'"
         }
     }
+    eof { fail "probe exited before the expected output" }
     timeout { fail "probe never started" }
 }
 puts "\n>>> probe seeded with the previous justification"
 
 expect {
     -re "Justification" {}
+    eof { fail "probe exited before the expected output" }
     timeout { fail "the justification prompt never rendered" }
 }
 puts "\n>>> prompt rendered"
@@ -43,12 +49,14 @@ puts "\n>>> prompt rendered"
 # The subtitle says why it is asking, so an unexpected prompt is explicable.
 expect {
     -re "required by \\d+ of \\d+ roles you selected" {}
+    eof { fail "probe exited before the expected output" }
     timeout { fail "the prompt does not say which roles require a justification" }
 }
 puts "\n>>> CHECK 0 PASS: the subtitle names how many roles require it"
 
 expect {
     -re "deploying the landing zone" {}
+    eof { fail "probe exited before the expected output" }
     timeout { fail "the prompt did not show the prefilled text — the user would have to retype it" }
 }
 puts "\n>>> CHECK 1 PASS: the prompt is prefilled with the previously used justification"
@@ -61,10 +69,15 @@ expect {
             fail "accepting the prefill returned '$expect_out(1,string)'"
         }
     }
+    eof { fail "probe exited before the expected output" }
     timeout { fail "no justification reported" }
 }
 puts "\n>>> CHECK 2 PASS: accepting the prefill returns it verbatim"
 
-expect { -re "PROBE_DONE" {} timeout { fail "probe did not finish" } }
+expect {
+    -re "PROBE_DONE" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "probe did not finish" }
+}
 puts "\n=== JUSTIFICATION PREFILL: PASSED ==="
 exit 0
