@@ -9,6 +9,13 @@ The exit-code contract will not change without a major version.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-11
+
+Security and correctness fixes for account isolation, activation state, and
+deactivation. JSON list rows now include `confirmed` and `state`; role keys
+preserve context-name case, with older keys accepted only when unambiguous.
+The exit-code contract is unchanged.
+
 ### Added
 
 - An installable `pimctl` agent skill covering account selection, scoped role
@@ -212,5 +219,6 @@ its last known state and is named.
 - macOS and Linux only. Paths, file modes and the pty tests assume a POSIX
   machine.
 
-[Unreleased]: https://github.com/larsakerlund/pimctl/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/larsakerlund/pimctl/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.3.0
 [0.2.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.2.0
