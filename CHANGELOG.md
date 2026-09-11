@@ -9,6 +9,10 @@ The exit-code contract will not change without a major version.
 
 ## [Unreleased]
 
+### Changed
+
+- Shortened the README and corrected the usage guide.
+
 ### Fixed
 
 - **`install.sh` no longer uses the GitHub API when it has no token.** The tag

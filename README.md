@@ -1,109 +1,56 @@
 # pimctl
 
-[![CI](https://github.com/larsakerlund/pimctl/actions/workflows/ci.yml/badge.svg)](https://github.com/larsakerlund/pimctl/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/larsakerlund/pimctl?sort=semver)](https://github.com/larsakerlund/pimctl/releases)
-[![Go Reference](https://pkg.go.dev/badge/github.com/larsakerlund/pimctl.svg)](https://pkg.go.dev/github.com/larsakerlund/pimctl)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+List, activate, and deactivate your eligible Azure resource roles through
+Microsoft Entra Privileged Identity Management (PIM).
 
-Activate the **Azure resource roles** you are eligible for through Microsoft
-Entra Privileged Identity Management, from the command line, in batch.
-
-```console
-$ pimctl up --role "Cost Management Contributor" --for 1h -j "landing zone work" -y
-#  ROLE                         SCOPE                           TYPE             UNTIL             RESULT
-1  Cost Management Contributor  Contoso landin… (contoso-prod)  ManagementGroup  2026-09-04 13:41  ✓ ACTIVATED
-```
+Supports batch activation and eligibility inherited through groups. Entra ID
+directory roles and PIM for Groups are outside its scope.
 
 ## Install
+
+Requires macOS or Linux and the [Azure CLI](https://learn.microsoft.com/cli/azure/).
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/larsakerlund/pimctl/main/install.sh | sh
 ```
 
-It downloads the release built for your machine, checks it against the
-release's sha256 list, and installs `pimctl` into `~/.local/bin`. Run
-`sh install.sh -h` for the few things you can change. Or
-`go install github.com/larsakerlund/pimctl/cmd/pimctl@latest`, or an archive
-from [Releases](https://github.com/larsakerlund/pimctl/releases).
+The installer downloads the release for your platform, verifies its SHA-256
+checksum, and installs it in `~/.local/bin`. Follow its PATH instructions if needed.
+You can also download an archive from
+[Releases](https://github.com/larsakerlund/pimctl/releases).
 
-To uninstall: `pimctl cache clear --all`, then `rm ~/.local/bin/pimctl`.
+## Use
 
-## Quick start
-
-You need the [Azure CLI](https://learn.microsoft.com/cli/azure/) and an
-`az login`. That is the whole setup. pimctl uses that login's token and never
-asks for credentials of its own.
+Sign in with `az login`, then:
 
 ```sh
-pimctl ls                # what am I eligible for?
-pimctl up                # pick roles interactively (just type to filter)
-pimctl status            # what do I hold, and for how long?
-pimctl down              # give it all back
+pimctl ls                # list eligible roles
+pimctl up --for 1h       # pick roles and request up to one hour
+pimctl status            # show active roles and expiry times
+pimctl down              # deactivate listed active roles, after confirmation
 ```
 
-`pimctl --help` lists every command, and `pimctl up --help` the flags for
-selecting roles without the picker. [docs/usage.md](docs/usage.md) is the
-longer reference.
-
-## Presets
+Select roles directly for scripts:
 
 ```sh
-pimctl up --role Owner --scope contoso-prod --save-preset daily
-pimctl up daily          # replays it
-pimctl down daily
+pimctl up --role "Cost Management Contributor" --for 1h -j "Monthly reporting" -y
+pimctl status -o json
 ```
 
-## Scripting
+`pimctl up --help` lists selection, duration, and preset options.
+The [usage guide](docs/usage.md) covers JSON output, status uncertainty,
+authentication, and troubleshooting. Exit code `2` means approval is still pending.
 
-Every command takes `-o json` and speaks one vocabulary: `key` selects a role,
-`until` ends an activation, `scopeLabel` is the scope as the tables print it.
+## Multiple tenants
 
-| Code | Meaning |
-|---|---|
-| 0 | every selected role reached a good terminal state, or was already there |
-| 1 | at least one role failed or never finished in time — and every usage error |
-| 2 | waiting for an approver: the change has **not** taken effect |
-| 130 | interrupted; requests already sent may still be in flight |
-
-Exit 2 exists so a script cannot read "queued for approval" as success.
-
-## Working across tenants
-
-[cloudctx](https://github.com/eliknut/cloudctx) keeps a separate Azure CLI login
-per tenant. It is optional: without it, everything above works against your
-`az login`. With it, pimctl follows the context your shell is in, takes
-`-c <name>` per command, and reads every context at once with `--all-contexts`.
-It needs cloudctx 1.4.0 or newer. It always tells you which tenant and user it
-used.
-
-## Not covered
-
-Entra ID directory roles and PIM for Groups: they need Microsoft Graph
-permissions the Azure CLI's app registration does not have. Eligibility you
-inherit through a group is supported, and is the normal case.
-
-## Troubleshooting
-
-| Symptom | What it means |
-|---|---|
-| `FAILED … MfaRule` | the token lacks an MFA claim — log in again with `az login` |
-| `at least 5 minutes` | PIM will not deactivate a role activated less than five minutes ago |
-| `status` shows nothing you believe you hold | Azure's listing lags its own writes; deactivate **by name**, which asks ARM regardless of the listing |
-
-The rest are in [docs/usage.md](docs/usage.md#troubleshooting), with the
-measurements behind them in [docs/design.md](docs/design.md).
+Optional [cloudctx](https://github.com/eliknut/cloudctx) integration requires
+version 1.4.0 or newer. pimctl follows `$CLOUDCTX_CONTEXT`; use `-c NAME` to
+select a context or `--all-contexts` to work across them.
 
 ## Development
 
-```sh
-make check      # everything that has to be green before a change is done
-```
+Run `make check`. See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites,
+[docs/design.md](docs/design.md) for architecture, and [SECURITY.md](SECURITY.md)
+for credential storage and reporting issues.
 
-[CONTRIBUTING.md](CONTRIBUTING.md) says what that gate expects — including the
-documentation checker, which fails a change whose new declarations have no
-comments. [docs/design.md](docs/design.md) is why the tool is shaped the way it
-is. `make install` builds from a clone and adds the zsh completion.
-
-## Licence
-
-MIT — see [LICENSE](LICENSE).
+MIT licensed. See [LICENSE](LICENSE).

@@ -16,12 +16,13 @@ use, and the full list of messages you might have to act on.
 | `pimctl cache clear` | drop cached tokens, listings and policies (`--all` also forgets what this machine activated) |
 | `pimctl version` | the release tag, or the commit for a local build |
 
-`up`, `down` and `ls` are the everyday spellings; `activate`, `deactivate` and
-`list` are the same commands under their original names.
+`up` and `ls` are the everyday spellings of `activate` and `list`. With no
+selection, `down` selects all listed active roles and asks for confirmation;
+`deactivate` opens a picker instead.
 
 ## Selecting roles
 
-Without flags, `up` and `down` open a type-to-filter picker: type to narrow,
+Without selection flags, `up` and `deactivate` open a type-to-filter picker: type to narrow,
 `tab` toggles, `ctrl+a` toggles everything matching, `enter` confirms, `esc`
 clears the filter and quits when it is already empty.
 
@@ -54,7 +55,7 @@ preset survives an access review.
 
 ## JSON output
 
-Every command speaks one vocabulary under `-o json`: `key`, `role`, `scope`,
+`ls`, `up`, `down`, and `status` use the following vocabulary under `-o json`: `key`, `role`, `scope`,
 `scopeName`, `scopeLabel` (the scope as the tables print it), `scopeType`,
 `since`/`until` for an activation window, and `eligibleUntil` for when the
 *eligibility* lapses.
@@ -75,6 +76,39 @@ held) or `unconfirmed` (Azure did not answer for that scope).
 **An empty `roles` with a non-empty `unconfirmedScopes` means *unknown*, not
 *nothing*.** See [the propagation window](design.md#the-propagation-window).
 
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | selected operations succeeded or were already satisfied |
+| 1 | a failure, incomplete operation, or usage error |
+| 2 | waiting for an approver; the change has not taken effect |
+| 130 | interrupted; requests already sent may still be in flight |
+
+With `--no-wait`, exit 0 can also mean requests were submitted without waiting
+for completion. Check their state before assuming access was granted or removed.
+
+## Other installation options
+
+Install from Go source:
+
+```sh
+go install github.com/larsakerlund/pimctl/cmd/pimctl@latest
+```
+
+For installer options, download the script and read its help:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/larsakerlund/pimctl/main/install.sh -o install.sh
+sh install.sh -h
+```
+
+To remove the default binary and cached data, run `pimctl cache clear --all`,
+then `rm ~/.local/bin/pimctl`. Presets and remembered justification remain in
+`$XDG_CONFIG_HOME/pimctl` (normally `~/.config/pimctl`); remove that directory
+only if you also want to discard them. Remove any shell completion you installed
+separately.
+
 ## Which login a run uses
 
 pimctl never logs in. It asks the Azure CLI for an ARM token and talks to
@@ -82,7 +116,8 @@ pimctl never logs in. It asks the Azure CLI for an ARM token and talks to
 
 In precedence order: `--bare-az`, then `-c`, `--all-contexts`, a preset's
 contexts, `$CLOUDCTX_CONTEXT`, and finally the shared `az login`. Whichever it
-lands on, the run prints the tenant and user that login resolved to.
+lands on, the shared-login path prints its tenant and user; named contexts
+are identified by their context names.
 `pimctl help auth` explains the same thing in the terminal.
 
 With [cloudctx](https://github.com/eliknut/cloudctx), each context's ARM token
