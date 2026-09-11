@@ -103,7 +103,7 @@ func runStatus(cmd *cobra.Command, rc *runContext, fast, wait bool) ([]activeRow
 		local.verdicts = verifyConfirming(rc.Ctx, rc, active, slow)
 		merged := mergeActive(local, active, slow)
 		for _, s := range rc.Sessions {
-			reconcileRecord(s.Token.Label(), active, slow, local.verdicts)
+			reconcileRecord(s.owner(), active, slow, local.verdicts)
 		}
 		printStatus(cmd, rc, merged, slow)
 		reportUnconfirmedScopes(cmd, rc, slow)
@@ -124,7 +124,7 @@ func runStatus(cmd *cobra.Command, rc *runContext, fast, wait bool) ([]activeRow
 	local.verdicts = verifyConfirming(rc.Ctx, rc, res.rows, res.unconfirmed)
 	merged := mergeActive(local, res.rows, res.unconfirmed)
 	for _, s := range rc.Sessions {
-		reconcileRecord(s.Token.Label(), res.rows, res.unconfirmed, local.verdicts)
+		reconcileRecord(s.owner(), res.rows, res.unconfirmed, local.verdicts)
 	}
 	reportStatusDelta(cmd, rc, local, res.rows, res.unconfirmed)
 	return merged, res.errs

@@ -22,15 +22,20 @@ cloudctx is refused with one message naming the version needed; the shared
 
 ## What is on disk, and why
 
-Four things, none of them authoritative over Azure:
+Persisted files, none of them authoritative over Azure:
 
 | Where | What | TTL |
 |---|---|---|
 | `$CLOUDCTX_STORE/pimctl/token-*.json` | ARM access token per context, `0600`, refused if wider | until 5 min before expiry |
 | `$CLOUDCTX_STORE/pimctl/active-*.json` | activations this machine performed | until each window ends |
-| `$XDG_CACHE_HOME/pimctl/eligibilities-*.json` | eligible-role listing per context | 10 min |
+| `$XDG_CACHE_HOME/pimctl/eligibilities-*.json` | eligible-role listing per account | 10 min |
 | `$XDG_CACHE_HOME/pimctl/policies-*.json` | each role's PIM policy per (scope, role) | 24 h |
 | `$XDG_CACHE_HOME/pimctl/cloudctx-version.json` | the probed cloudctx version, keyed by the binary | 24 h |
+
+Role listings, policies and activation records include an account digest in the
+filename and verify the stored context, tenant and principal on read. Older
+files without ownership are ignored. A token is reused only if the selected
+Azure CLI profile still matches its tenant and user.
 
 The first two belong to one context, so they live inside that context's cloudctx
 store and `cloudctx delete` sweeps them; a file written by an earlier pimctl

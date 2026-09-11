@@ -25,6 +25,8 @@ The exit-code contract will not change without a major version.
   keep context identity when matching activations or reporting unread scopes.
 - Concurrent 401 responses share one token refresh. Refresh refuses a changed
   tenant or principal instead of continuing an existing plan under a new account.
+- Eligibility and policy caches, and activation records, are bound to the
+  authenticated context, tenant, and principal. Older unbound files are ignored.
 
 - **`install.sh` no longer uses the GitHub API when it has no token.** The tag
   comes from where `/releases/latest` redirects, and the files from the

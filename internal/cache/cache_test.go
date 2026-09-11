@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
+	"github.com/larsakerlund/pimctl/internal/store"
 )
 
 // contribGUID is a real built-in role id, used so the key derivation is
@@ -47,7 +48,7 @@ func ageCache(path string, by time.Duration) error {
 // without sleeping.
 func agePolicyCache(t *testing.T, context string, by time.Duration) error {
 	t.Helper()
-	path, err := policyPath(context)
+	path, err := policyPath(testOwner(context))
 	if err != nil {
 		return err
 	}
@@ -82,14 +83,14 @@ func agePolicyCache(t *testing.T, context string, by time.Duration) error {
 func TestEligibilityCacheRoundTripAndExpiry(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	if _, _, ok := Read("contoso"); ok {
+	if _, _, ok := Read(testOwner("contoso")); ok {
 		t.Fatal("a fresh cache dir should have nothing in it")
 	}
 
 	roles := []armclient.Eligibility{{ID: "/x", Name: "x"}}
-	Write("contoso", roles)
+	Write(testOwner("contoso"), roles)
 
-	got, age, ok := Read("contoso")
+	got, age, ok := Read(testOwner("contoso"))
 	if !ok {
 		t.Fatal("the entry just written should be readable")
 	}
@@ -101,37 +102,37 @@ func TestEligibilityCacheRoundTripAndExpiry(t *testing.T) {
 	}
 
 	// A different context must not see it.
-	if _, _, ok := Read("globex"); ok {
+	if _, _, ok := Read(testOwner("globex")); ok {
 		t.Error("the cache must be per-context")
 	}
 
 	// Corrupt content is treated as a miss, never an error.
-	p, err := eligibilityPath("contoso")
+	p, err := eligibilityPath(testOwner("contoso"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := writeFile(p, "not json"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := Read("contoso"); ok {
+	if _, _, ok := Read(testOwner("contoso")); ok {
 		t.Error("corrupt cache content should read as a miss")
 	}
 
 	// Expiry.
-	Write("contoso", roles)
+	Write(testOwner("contoso"), roles)
 	if err := ageCache(p, TTL+time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := Read("contoso"); ok {
+	if _, _, ok := Read(testOwner("contoso")); ok {
 		t.Error("an entry older than the TTL must not be used")
 	}
 
 	// Clear removes it.
-	Write("contoso", roles)
+	Write(testOwner("contoso"), roles)
 	if _, err := Clear(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := Read("contoso"); ok {
+	if _, _, ok := Read(testOwner("contoso")); ok {
 		t.Error("Clear should have removed the entry")
 	}
 }
@@ -154,7 +155,7 @@ func TestPolicyCacheRoundTripAndTTL(t *testing.T) {
 	scope := "/providers/Microsoft.Management/managementGroups/contoso-prod"
 	roleDef := "/providers/Microsoft.Authorization/roleDefinitions/" + contribGUID
 
-	if got := LookupPolicy("contoso", scope, roleDef, false); got != nil {
+	if got := LookupPolicy(testOwner("contoso"), scope, roleDef, false); got != nil {
 		t.Fatal("a fresh cache dir should hold no policies")
 	}
 
@@ -163,11 +164,11 @@ func TestPolicyCacheRoundTripAndTTL(t *testing.T) {
 		MaximumDurationISO: "PT4H",
 		EnabledRules:       []string{"MultiFactorAuthentication", "Justification"},
 	}
-	StorePolicies("contoso", map[string]*armclient.RoleSettings{
+	StorePolicies(testOwner("contoso"), map[string]*armclient.RoleSettings{
 		PolicyKey(scope, roleDef): want,
 	})
 
-	got := LookupPolicy("contoso", scope, roleDef, false)
+	got := LookupPolicy(testOwner("contoso"), scope, roleDef, false)
 	if got == nil {
 		t.Fatal("the policy just stored should be readable")
 	}
@@ -176,18 +177,23 @@ func TestPolicyCacheRoundTripAndTTL(t *testing.T) {
 	}
 
 	// Keyed on scope and role, not one or the other.
-	if LookupPolicy("contoso", "/subscriptions/other", roleDef, false) != nil {
+	if LookupPolicy(testOwner("contoso"), "/subscriptions/other", roleDef, false) != nil {
 		t.Error("a different scope must miss")
 	}
-	if LookupPolicy("contoso", scope, "/providers/Microsoft.Authorization/roleDefinitions/other", false) != nil {
+	if LookupPolicy(
+		testOwner("contoso"),
+		scope,
+		"/providers/Microsoft.Authorization/roleDefinitions/other",
+		false,
+	) != nil {
 		t.Error("a different role must miss")
 	}
-	if LookupPolicy("globex", scope, roleDef, false) != nil {
+	if LookupPolicy(testOwner("globex"), scope, roleDef, false) != nil {
 		t.Error("the policy cache must be per-context")
 	}
 
 	// --refresh bypasses it.
-	if LookupPolicy("contoso", scope, roleDef, true) != nil {
+	if LookupPolicy(testOwner("contoso"), scope, roleDef, true) != nil {
 		t.Error("--refresh must bypass the policy cache")
 	}
 
@@ -195,7 +201,7 @@ func TestPolicyCacheRoundTripAndTTL(t *testing.T) {
 	if err := agePolicyCache(t, "contoso", PolicyTTL+time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if LookupPolicy("contoso", scope, roleDef, false) != nil {
+	if LookupPolicy(testOwner("contoso"), scope, roleDef, false) != nil {
 		t.Error("a policy older than the TTL must not be used")
 	}
 }
@@ -209,16 +215,16 @@ func TestDropPolicyRemovesOnlyTheRejectedEntry(t *testing.T) {
 	roleDef := "/providers/Microsoft.Authorization/roleDefinitions/" + contribGUID
 	s := &armclient.RoleSettings{MaximumDurationISO: "PT4H", MaximumDuration: 4 * time.Hour}
 
-	StorePolicies("contoso", map[string]*armclient.RoleSettings{
+	StorePolicies(testOwner("contoso"), map[string]*armclient.RoleSettings{
 		PolicyKey(scopeA, roleDef): s,
 		PolicyKey(scopeB, roleDef): s,
 	})
-	DropPolicy("contoso", scopeA, roleDef)
+	DropPolicy(testOwner("contoso"), scopeA, roleDef)
 
-	if LookupPolicy("contoso", scopeA, roleDef, false) != nil {
+	if LookupPolicy(testOwner("contoso"), scopeA, roleDef, false) != nil {
 		t.Error("the rejected policy should have been dropped")
 	}
-	if LookupPolicy("contoso", scopeB, roleDef, false) == nil {
+	if LookupPolicy(testOwner("contoso"), scopeB, roleDef, false) == nil {
 		t.Error("DropPolicy removed an unrelated entry")
 	}
 }
@@ -227,7 +233,7 @@ func TestClearPolicies(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	scope := "/subscriptions/x"
 	roleDef := "/providers/Microsoft.Authorization/roleDefinitions/" + contribGUID
-	StorePolicies("contoso", map[string]*armclient.RoleSettings{
+	StorePolicies(testOwner("contoso"), map[string]*armclient.RoleSettings{
 		PolicyKey(scope, roleDef): {MaximumDurationISO: "PT1H", MaximumDuration: time.Hour},
 	})
 	n, err := ClearPolicies()
@@ -237,7 +243,62 @@ func TestClearPolicies(t *testing.T) {
 	if n != 1 {
 		t.Errorf("ClearPolicies removed %d files, want 1", n)
 	}
-	if LookupPolicy("contoso", scope, roleDef, false) != nil {
+	if LookupPolicy(testOwner("contoso"), scope, roleDef, false) != nil {
 		t.Error("the policy survived ClearPolicies")
+	}
+}
+
+func testOwner(name string) store.Owner {
+	return store.Owner{Context: name, TenantID: "tid-1", PrincipalID: "oid-1"}
+}
+
+func TestCachesAreBoundToTenantAndPrincipal(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	owner := testOwner("")
+	roles := []armclient.Eligibility{{ID: "old-account-role"}}
+	Write(owner, roles)
+	scope, role := "/providers/Microsoft.Management/managementGroups/shared", "reader"
+	StorePolicies(owner, map[string]*armclient.RoleSettings{PolicyKey(scope, role): {MaximumDuration: time.Hour}})
+	for _, other := range []store.Owner{
+		{Context: "", TenantID: "other-tenant", PrincipalID: owner.PrincipalID},
+		{Context: "", TenantID: owner.TenantID, PrincipalID: "other-user"},
+		{},
+	} {
+		if _, _, ok := Read(other); ok {
+			t.Errorf("another owner read roles: %+v", other)
+		}
+		if LookupPolicy(other, scope, role, false) != nil {
+			t.Errorf("another owner read policy: %+v", other)
+		}
+	}
+	other := store.Owner{TenantID: owner.TenantID, PrincipalID: "other-user"}
+	Write(other, []armclient.Eligibility{{ID: "new-account-role"}})
+	got, _, ok := Read(owner)
+	if !ok || len(got) != 1 || got[0].ID != "old-account-role" {
+		t.Fatal("another user's write replaced the original account's data")
+	}
+	// Renaming a file must not bypass the ownership check inside it.
+	oldPath, err := eligibilityPath(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPath, err := eligibilityPath(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(oldPath) //nolint:gosec // Account-cache path in this test's temporary directory.
+	if err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // Account-cache path in this test's temporary directory.
+	if err := os.WriteFile(
+		newPath,
+		raw,
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := Read(other); ok {
+		t.Fatal("renamed file bypassed ownership check")
 	}
 }

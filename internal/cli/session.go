@@ -10,11 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/azauth"
+	"github.com/larsakerlund/pimctl/internal/store"
 )
 
 // session is one context's token plus the ARM client bound to it.
@@ -30,6 +30,15 @@ type session struct {
 	Client      *armclient.Client // bound to that identity, with a refreshable bearer token.
 	refreshOnce sync.Once         // coordinates one refresh across all concurrent requests.
 	refreshErr  error             // written by refreshOnce and read only after it completes.
+}
+
+// owner returns the immutable account identity for persisted state. A missing
+// session has no owner and must not write or reuse account-owned data.
+func (s *session) owner() store.Owner {
+	if s == nil || s.Token == nil {
+		return store.Owner{}
+	}
+	return s.Token.Owner()
 }
 
 // labelOf names a context for messages; the ambient az login has no name.
@@ -169,8 +178,7 @@ func refreshSession(s *session) error {
 	if err != nil {
 		return err
 	}
-	if s.Token.TenantID == "" || s.Token.PrincipalID == "" || !strings.EqualFold(s.Token.TenantID, fresh.TenantID) ||
-		!strings.EqualFold(s.Token.PrincipalID, fresh.PrincipalID) {
+	if !s.owner().Matches(fresh.Owner()) {
 		return errors.New("the signed-in account changed; rerun pimctl to select roles for the new account")
 	}
 	s.Client.SetToken(fresh.AccessToken)

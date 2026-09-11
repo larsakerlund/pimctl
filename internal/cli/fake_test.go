@@ -292,8 +292,8 @@ func (f *fakeARM) installContexts(contexts []string, failures []error) {
 			tok := &azauth.Token{
 				Context:     name,
 				AccessToken: "fake",
-				PrincipalID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-				TenantID:    "11111111-2222-3333-4444-555555555555",
+				PrincipalID: "oid-1",
+				TenantID:    "tid-1",
 			}
 			sessions = append(sessions, &session{
 				Context: name,

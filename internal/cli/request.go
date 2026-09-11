@@ -1,7 +1,7 @@
 // Everything between one planned role and its outcome: the two ARM request
 // bodies — the same PUT with a different requestType, so activation and
 // deactivation cannot drift apart — the submit-and-poll loop, and the mapping
-// from an ARM status or error onto a [Result]. Which roles get here, and for
+// from an ARM status or error onto a [result]. Which roles get here, and for
 // how long, is decided in plan.go; printing what came back is report.go.
 
 package cli
@@ -24,6 +24,7 @@ import (
 // Outcome is deliberately left at its zero value — every caller sets it.
 func baseResult(item *planItem) result {
 	return result{
+		Owner:            item.Session.owner(),
 		Key:              item.Row.SelectionKey(),
 		Context:          item.Row.Context,
 		Role:             item.Row.Elig.RoleName(),
@@ -280,7 +281,7 @@ func applyRequestError(res result, s *session, err error, alreadyActiveUntil *ti
 	case armclient.KindPolicyValidation:
 		// The cached policy is now known to disagree with ARM's, so drop it:
 		// the next run re-reads rather than repeating the same rejection.
-		cache.DropPolicy(res.Context, res.Scope, res.RoleDefinitionID)
+		cache.DropPolicy(res.Owner, res.Scope, res.RoleDefinitionID)
 		res.Outcome = OutcomeFailed
 		if len(ae.FailedRules) > 0 {
 			res.Detail = fmt.Sprintf("%s: policy rules failed: %s", ae.Code, strings.Join(ae.FailedRules, ", "))
@@ -322,6 +323,7 @@ func buildDeactivateBody(principalID, roleDefinitionID string) armclient.Request
 // saying in words rather than passing ARM's code through.
 func deactivateOne(ctx context.Context, row target, noWait bool, pollTimeout time.Duration) result {
 	res := result{
+		Owner:            row.Session.owner(),
 		Key:              selectionKeyFor(row.Context, row.Scope, armclient.RoleDefinitionGUID(row.RoleDefinitionID)),
 		Context:          row.Context,
 		Role:             row.RoleName,

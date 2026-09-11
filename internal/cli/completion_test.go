@@ -133,14 +133,25 @@ func TestCompleteKeysReadsOnlyTheCache(t *testing.T) {
 	t.Setenv(envContext, "")
 	opts := &globalOpts{contexts: []string{"contoso"}}
 	// Any exec at all would be a network call or a token mint behind a TAB.
-	installFakeRunner(t, nil)
+	installFakeRunner(t, []string{"contoso"})
 
 	// A cold cache completes to nothing rather than filling it.
 	if got, _ := completeKeys(opts); len(got) != 0 {
 		t.Errorf("a cold cache should complete to nothing, got %v", got)
 	}
 
-	cache.Write("contoso", twoLowImpactRoles())
+	azauth.WriteTokenCache(
+		&azauth.Token{
+			Context:           "contoso",
+			TenantID:          "tid-1",
+			PrincipalID:       "oid-1",
+			UserPrincipalName: "test@example.com",
+			AccessToken:       "fake",
+			ExpiresOn:         farFutureExpiry(),
+		},
+		azauth.DefaultRunner,
+	)
+	cache.Write(testOwner("contoso"), twoLowImpactRoles())
 	got, directive := completeKeys(opts)
 	if directive != cobra.ShellCompDirectiveNoFileComp {
 		t.Errorf("directive = %v", directive)

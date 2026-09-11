@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ import (
 // file carrying anything else is treated as empty rather than migrated: ARM is
 // the authority anyway, so an unreadable record costs one fan-out and nothing
 // else.
-const recordVersion = 1
+const recordVersion = 2
 
 // recordRevoked marks an entry as a tombstone: a role this machine has just
 // given up. It is kept, rather than deleted, because ARM's per-scope listing
@@ -156,6 +157,7 @@ func recordKey(context, scope, roleDefinitionID string) string {
 // entries. Nothing in it is a secret — role names, scopes and timestamps, never
 // a token.
 type recordFile struct {
+	Owner   store.Owner   `json:"owner"`   // account whose activations these entries describe.
 	Version int           `json:"version"` // a mismatch retires the file rather than risking a misread.
 	Entries []recordEntry `json:"entries"` // every activation and tombstone still worth keeping.
 }
@@ -176,49 +178,47 @@ func stateDir() (string, error) {
 	return filepath.Join(home, ".local", "state", "pimctl"), nil
 }
 
-// recordPath is where one context's record lives: active-<context>.json inside
-// that context's cloudctx store, at `$CLOUDCTX_STORE/pimctl/`, so `cloudctx
-// delete <name>` forgets what this machine activated in that context along
-// with the credentials it did it with. The name is sanitised so a context
-// cannot write outside the directory it belongs in.
-//
-// A context with no reachable store — no cloudctx, one older than
-// [azauth.MinCloudctxVersion], a context cloudctx does not know — and the
-// unnamed shared az login keep the pre-contract location under [stateDir],
-// filed under _az_login for the nameless one. That is also the directory a
-// record is migrated from the first time the store answers. It returns
-// stateDir's error and no path.
-func recordPath(context string) (string, error) {
+// recordPath locates an account-owned record inside its cloudctx context's
+// store, or under stateDir for shared az and unavailable stores. Only files
+// with the same account-specific name are migrated from the fallback directory;
+// older files without ownership are never attributed to the current account.
+func recordPath(owner store.Owner) (string, error) {
 	dir, err := stateDir()
 	if err != nil {
 		return "", err
 	}
-	name := "active-" + store.FileName(context) + ".json"
-	return azauth.ContextStatePath(context, name, dir, azauth.DefaultRunner), nil
+	name := "active-" + owner.FileName() + ".json"
+	return azauth.ContextStatePath(owner.Context, name, dir, azauth.DefaultRunner), nil
 }
 
-// readRecord returns a context's live entries, tombstones included. Callers
-// showing what is held want HeldEntries instead.
+// readRecord returns an account's live entries, tombstones included.
 // A missing, corrupt or wrong-version file is an empty record, never an error:
 // the ARM fan-out is the authority and will fill it in.
-func readRecord(context string) []recordEntry {
-	path, err := recordPath(context)
+func readRecord(owner store.Owner) []recordEntry {
+	path, err := recordPath(owner)
 	if err != nil {
 		return nil
 	}
-	return readRecordFile(path)
+	return readOwnedRecordFile(path, &owner)
 }
 
 // readRecordFile reads one record file's live entries. A missing, corrupt or
 // wrong-version file is an empty record, never an error: the ARM fan-out is the
 // authority and will fill it in.
-func readRecordFile(path string) []recordEntry {
+func readRecordFile(path string) []recordEntry { return readOwnedRecordFile(path, nil) }
+
+// readOwnedRecordFile checks file ownership when owner is non-nil. A nil owner
+// is reserved for cache-clear reporting, which never renders roles as held.
+func readOwnedRecordFile(path string, owner *store.Owner) []recordEntry {
 	raw, err := os.ReadFile(path) //nolint:gosec // path is the state dir plus a sanitised context name
 	if err != nil {
 		return nil
 	}
 	var f recordFile
 	if err = json.Unmarshal(raw, &f); err != nil || f.Version != recordVersion {
+		return nil
+	}
+	if owner != nil && !f.Owner.Matches(*owner) {
 		return nil
 	}
 	now := time.Now()
@@ -231,10 +231,13 @@ func readRecordFile(path string) []recordEntry {
 	return live
 }
 
-// writeRecord replaces a context's record, pruning expired entries on the way
+// writeRecord replaces an account's record, pruning expired entries on the way
 // out so the file cannot grow without bound.
-func writeRecord(context string, entries []recordEntry) {
-	path, err := recordPath(context)
+func writeRecord(owner store.Owner, entries []recordEntry) {
+	if !owner.Valid() {
+		return
+	}
+	path, err := recordPath(owner)
 	if err != nil {
 		return
 	}
@@ -245,7 +248,7 @@ func writeRecord(context string, entries []recordEntry) {
 			keep = append(keep, e)
 		}
 	}
-	blob, err := json.Marshal(recordFile{Version: recordVersion, Entries: keep})
+	blob, err := json.Marshal(recordFile{Version: recordVersion, Owner: owner, Entries: keep})
 	if err != nil {
 		return
 	}
@@ -262,6 +265,11 @@ func writeRecord(context string, entries []recordEntry) {
 // is a filename rather than something a user typed.
 func contextFromRecordFile(fileName string) string {
 	name := strings.TrimSuffix(strings.TrimPrefix(fileName, "active-"), ".json")
+	if i := strings.LastIndexByte(name, '-'); i >= 0 && len(name[i+1:]) == 64 {
+		if _, err := hex.DecodeString(name[i+1:]); err == nil {
+			name = name[:i]
+		}
+	}
 	if name == store.AzLoginName {
 		return "the shared az login"
 	}

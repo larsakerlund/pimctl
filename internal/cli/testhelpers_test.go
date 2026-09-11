@@ -289,7 +289,7 @@ func TestMain(m *testing.M) {
 // shipped called was production code in name only. The context is fixed at
 // contoso, the only one the record tests use.
 func heldEntries() []recordEntry {
-	entries := readRecord("contoso")
+	entries := readRecord(testOwner("contoso"))
 	held := make([]recordEntry, 0, len(entries))
 	for _, e := range entries {
 		if !e.Revoked() {
@@ -304,11 +304,11 @@ func heldEntries() []recordEntry {
 // expired — which is what a record left behind by yesterday's work looks like.
 func writeRecordFileForTest(t *testing.T, context string, entries []recordEntry) {
 	t.Helper()
-	path, err := recordPath(context)
+	path, err := recordPath(testOwner(context))
 	if err != nil {
 		t.Fatal(err)
 	}
-	blob, err := json.Marshal(recordFile{Version: recordVersion, Entries: entries})
+	blob, err := json.Marshal(recordFile{Version: recordVersion, Owner: testOwner(context), Entries: entries})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,4 +348,12 @@ func writeFileForTest(t *testing.T, dir, name, content string) error {
 // treated as usable.
 func farFutureExpiry() string {
 	return time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000")
+}
+
+// testOwner is the account the fake ARM session authenticates as.
+func testOwner(name string) store.Owner {
+	if name == "(default)" {
+		name = ""
+	}
+	return store.Owner{Context: name, TenantID: "tid-1", PrincipalID: "oid-1"}
 }

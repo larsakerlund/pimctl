@@ -48,7 +48,7 @@ func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) 
 				age       time.Duration
 			)
 			if !rc.Refresh {
-				if cached, a, ok := cache.Read(label); ok {
+				if cached, a, ok := cache.Read(s.owner()); ok {
 					elig, age, fromCache = cached, a, true
 				}
 			}
@@ -76,7 +76,7 @@ func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) 
 				}
 			} else {
 				cacheOK = false
-				cache.Write(label, elig)
+				cache.Write(s.owner(), elig)
 			}
 			scopes = append(scopes, scopesFor(label, elig)...)
 			for _, e := range elig {

@@ -57,7 +57,7 @@ func TestActivationDiscoveryKeepsEachContextsScopes(t *testing.T) {
 				if emptySecond && label == "globex" {
 					elig = nil
 				}
-				cache.Write(label, elig)
+				cache.Write(tok.Owner(), elig)
 			}
 			_, errs, slow := listActivations(rc.Ctx, rc, nil)
 			if len(errs) > 0 || len(slow) > 0 {

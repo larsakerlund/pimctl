@@ -120,12 +120,18 @@ store, and `--keep-store` keeps it. A token written by an earlier pimctl, under
 Without cloudctx, and for the shared `az login` — which belongs to no context —
 the XDG directory is still where it goes.
 
-Placement is not the guarantee, though: the entry also records the tenant it was
-minted for and is refused when that no longer matches what `cloudctx show`
-reports. A context can be repointed at another tenant without being deleted, so
-where the file sits says less about which tenant it is for than the tenant
-recorded in it does. The check costs a registry read and no `az` spawn, shared
-with the store lookup.
+Before reuse, the cached token must match the tenant and user selected in the
+Azure CLI profile. Named contexts read the profile in their own Azure store
+and also check any tenant pinned by `cloudctx show`; the shared login reads
+`~/.azure/azureProfile.json`. An absent or unfamiliar profile causes a fresh
+mint. These checks need no `az` spawn. Concurrent 401 responses share one
+refresh, which must preserve the command's tenant and principal.
+
+Role listings, policies, and activation records are separately bound to context,
+tenant, and principal, both in their filenames and stored ownership. Switching
+accounts cannot reuse the previous account's roles. Older files without this
+ownership are ignored; role caches are fetched again from ARM.
+
 `pimctl cache clear` removes the entries outright, in the XDG directory and in
 every context's store.
 

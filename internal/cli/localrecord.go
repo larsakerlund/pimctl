@@ -59,7 +59,7 @@ func readLocalRecord(rc *runContext) localRecord {
 	now := time.Now()
 	for _, s := range rc.Sessions {
 		label := s.Token.Label()
-		for _, e := range readRecord(s.Token.Label()) {
+		for _, e := range readRecord(s.owner()) {
 			row := recordRow(label, s, e)
 			if e.Revoked() {
 				lr.revoked[activeSelectionKey(row)] = e

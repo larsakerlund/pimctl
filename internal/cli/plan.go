@@ -1,5 +1,5 @@
 // From a selection to a plan, and from a run to a verdict: each role's PIM
-// policy, the duration that survives it, and the [Result]/[Outcome] vocabulary
+// policy, the duration that survives it, and the [result]/[outcome] vocabulary
 // every command reports in. Sending the requests is execute.go and request.go;
 // printing them is report.go.
 
@@ -16,6 +16,7 @@ import (
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/cache"
+	"github.com/larsakerlund/pimctl/internal/store"
 )
 
 // planItem is one role about to be activated, with its policy resolved and its
@@ -80,7 +81,7 @@ func buildPlan(
 		freshMu sync.Mutex
 		// fresh collects the policies actually read from ARM, so they can be
 		// persisted in one write rather than one per role.
-		fresh = map[string]map[string]*armclient.RoleSettings{}
+		fresh = map[store.Owner]map[string]*armclient.RoleSettings{}
 	)
 	for i, r := range rows {
 		items[i] = &planItem{
@@ -100,11 +101,11 @@ func buildPlan(
 			}
 			scope := item.Row.Elig.Properties.Scope
 			roleDef := item.Row.Elig.Properties.RoleDefinitionID
-			ctxName := item.Row.Context
+			owner := item.Session.owner()
 
 			// Two sequential ARM GETs, about 1.2s per role, on the critical
 			// path of the command people run most. A persisted copy skips them.
-			s := cache.LookupPolicy(ctxName, scope, roleDef, refresh)
+			s := cache.LookupPolicy(owner, scope, roleDef, refresh)
 			if s == nil {
 				var err error
 				if s, err = item.Session.Client.GetRoleSettings(ctx, scope, roleDef); err != nil {
@@ -112,10 +113,10 @@ func buildPlan(
 					return
 				}
 				freshMu.Lock()
-				if fresh[ctxName] == nil {
-					fresh[ctxName] = map[string]*armclient.RoleSettings{}
+				if fresh[owner] == nil {
+					fresh[owner] = map[string]*armclient.RoleSettings{}
 				}
-				fresh[ctxName][cache.PolicyKey(scope, roleDef)] = s
+				fresh[owner][cache.PolicyKey(scope, roleDef)] = s
 				freshMu.Unlock()
 			}
 			item.Settings = s
@@ -128,8 +129,8 @@ func buildPlan(
 		}(items[i])
 	}
 	wg.Wait()
-	for ctxName, settings := range fresh {
-		cache.StorePolicies(ctxName, settings)
+	for owner, settings := range fresh {
+		cache.StorePolicies(owner, settings)
 	}
 	return items
 }
@@ -169,6 +170,7 @@ const (
 // Renaming a field, or dropping an omitempty, breaks scripts that are already
 // written against it.
 type result struct {
+	Owner store.Owner `json:"-"` // authenticated owner for internal cache and record writes.
 	// Key is the same selection key `ls` and `status` print, so a script can
 	// feed a result straight back into `pimctl down --key`.
 	Key       string `json:"key"`

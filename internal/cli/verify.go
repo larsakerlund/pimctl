@@ -66,7 +66,7 @@ func verifyConfirming(
 	var ask []confirmQuestion
 	now := time.Now()
 	for _, s := range rc.Sessions {
-		for _, e := range readRecord(s.Token.Label()) {
+		for _, e := range readRecord(s.owner()) {
 			switch {
 			case !e.Confirming(now), listed[entryKey(e)], scopeIsUnread(unread, e.Context, e.Scope):
 				continue

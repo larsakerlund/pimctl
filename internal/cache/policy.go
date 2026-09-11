@@ -1,5 +1,5 @@
-// The persisted PIM policy cache: one file per context holding every
-// (scope, role) policy that context has read. The eligibility listing, and the
+// The persisted PIM policy cache: one file per account holding every
+// (scope, role) policy that account has read. The eligibility listing, and the
 // directory and atomic write both files share, are in cache.go; what a policy
 // contains is armclient.RoleSettings.
 
@@ -37,15 +37,16 @@ const PolicyTTL = 24 * time.Hour
 // policyVersion is the on-disk format of [policyFile]. A file written by any
 // other version is treated as absent, so a shape change costs one re-read
 // rather than a mis-parse.
-const policyVersion = 1
+const policyVersion = 2
 
-// policyFile is one context's whole policy cache: every entry it has read, in
+// policyFile is one account's whole policy cache: every entry it has read, in
 // a single file keyed by [PolicyKey]. One file rather than one per role because
 // `pimctl up` on a dozen roles would otherwise be a dozen opens on the warm
 // path, and the whole map is small enough to rewrite on every store.
 type policyFile struct {
+	Owner   store.Owner            `json:"owner"`   // authenticated owner of these policies.
 	Version int                    `json:"version"` // the on-disk format; a mismatch means "absent".
-	Entries map[string]policyEntry `json:"entries"` // every policy this context has read, keyed by [PolicyKey].
+	Entries map[string]policyEntry `json:"entries"` // every policy this account has read, keyed by [PolicyKey].
 }
 
 // policyEntry is one cached policy and when it was read; the TTL is measured
@@ -56,15 +57,15 @@ type policyEntry struct {
 	Settings  *armclient.RoleSettings `json:"settings"`  // the policy itself; nil is treated as a miss.
 }
 
-// policyPath is where one context's policy cache lives. FileName keeps the
+// policyPath is where one account's policy cache lives. FileName keeps the
 // unnamed az login in a file of its own, so it can never share one with a
 // named context.
-func policyPath(context string) (string, error) {
+func policyPath(owner store.Owner) (string, error) {
 	dir, err := store.Dir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "policies-"+store.FileName(context)+".json"), nil
+	return filepath.Join(dir, "policies-"+owner.FileName()+".json"), nil
 }
 
 // PolicyKey identifies a policy by scope and role definition, matching the
@@ -76,11 +77,11 @@ func PolicyKey(scope, roleDefinitionID string) string {
 	return strings.ToLower(scope) + "|" + strings.ToLower(armclient.RoleDefinitionGUID(roleDefinitionID))
 }
 
-// readPolicies loads the cached policies for a context. A missing, corrupt or
+// readPolicies loads the cached policies for an account. A missing, corrupt or
 // wrong-version file is an empty map, never an error: the caller just reads
 // from ARM instead.
-func readPolicies(context string) map[string]policyEntry {
-	path, err := policyPath(context)
+func readPolicies(owner store.Owner) map[string]policyEntry {
+	path, err := policyPath(owner)
 	if err != nil {
 		return nil
 	}
@@ -89,20 +90,23 @@ func readPolicies(context string) map[string]policyEntry {
 		return nil
 	}
 	var f policyFile
-	if err = json.Unmarshal(raw, &f); err != nil || f.Version != policyVersion {
+	if err = json.Unmarshal(raw, &f); err != nil || f.Version != policyVersion || !f.Owner.Matches(owner) {
 		return nil
 	}
 	return f.Entries
 }
 
-// writePolicies replaces a context's policy file. Failures are silent: a cache
+// writePolicies replaces an account's policy file. Failures are silent: a cache
 // that cannot be written must not break the activation that produced the data.
-func writePolicies(context string, entries map[string]policyEntry) {
-	path, err := policyPath(context)
+func writePolicies(owner store.Owner, entries map[string]policyEntry) {
+	if !owner.Valid() {
+		return
+	}
+	path, err := policyPath(owner)
 	if err != nil {
 		return
 	}
-	blob, err := json.Marshal(policyFile{Version: policyVersion, Entries: entries})
+	blob, err := json.Marshal(policyFile{Version: policyVersion, Owner: owner, Entries: entries})
 	if err != nil {
 		return
 	}
@@ -117,11 +121,11 @@ func writePolicies(context string, entries map[string]policyEntry) {
 // is `--refresh` on the command line: it forces a miss, so the caller reads
 // from ARM. Every nil is a miss, never an error — the caller's fallback is the
 // live read it would have done anyway.
-func LookupPolicy(context, scope, roleDefinitionID string, refresh bool) *armclient.RoleSettings {
+func LookupPolicy(owner store.Owner, scope, roleDefinitionID string, refresh bool) *armclient.RoleSettings {
 	if refresh {
 		return nil
 	}
-	entry, ok := readPolicies(context)[PolicyKey(scope, roleDefinitionID)]
+	entry, ok := readPolicies(owner)[PolicyKey(scope, roleDefinitionID)]
 	if !ok || entry.Settings == nil {
 		return nil
 	}
@@ -135,11 +139,11 @@ func LookupPolicy(context, scope, roleDefinitionID string, refresh bool) *armcli
 // [PolicyKey], stamping them all with the current time. Nil settings are
 // skipped, existing entries for other keys are preserved, and the file is
 // rewritten in full. It writes to disk and fails silently.
-func StorePolicies(context string, settings map[string]*armclient.RoleSettings) {
+func StorePolicies(owner store.Owner, settings map[string]*armclient.RoleSettings) {
 	if len(settings) == 0 {
 		return
 	}
-	entries := readPolicies(context)
+	entries := readPolicies(owner)
 	if entries == nil {
 		entries = map[string]policyEntry{}
 	}
@@ -149,7 +153,7 @@ func StorePolicies(context string, settings map[string]*armclient.RoleSettings) 
 			entries[key] = policyEntry{FetchedAt: now, Settings: s}
 		}
 	}
-	writePolicies(context, entries)
+	writePolicies(owner, entries)
 }
 
 // DropPolicy removes one entry, called when ARM answers
@@ -157,13 +161,13 @@ func StorePolicies(context string, settings map[string]*armclient.RoleSettings) 
 // copy no longer matches the live policy, so the next read goes to ARM. It
 // rewrites the file and fails silently; dropping an entry that is not there is
 // a no-op.
-func DropPolicy(context, scope, roleDefinitionID string) {
-	entries := readPolicies(context)
+func DropPolicy(owner store.Owner, scope, roleDefinitionID string) {
+	entries := readPolicies(owner)
 	if entries == nil {
 		return
 	}
 	delete(entries, PolicyKey(scope, roleDefinitionID))
-	writePolicies(context, entries)
+	writePolicies(owner, entries)
 }
 
 // ClearPolicies removes every context's policy file and reports how many it

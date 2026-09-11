@@ -255,7 +255,7 @@ func TestListFromCacheProducesOutputBeforeAnyNetworkCall(t *testing.T) {
 
 	// Warm the eligibility cache directly: this is the state after any earlier
 	// command in the same ten minutes.
-	cache.Write("contoso", twoLowImpactRoles())
+	cache.Write(testOwner("contoso"), twoLowImpactRoles())
 
 	blocked := make(chan struct{})
 	t.Cleanup(func() { close(blocked) })
@@ -270,7 +270,7 @@ func TestListFromCacheProducesOutputBeforeAnyNetworkCall(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
-		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid", TenantID: "tid"}
+		tok := &azauth.Token{Context: "contoso", AccessToken: "fake", PrincipalID: "oid-1", TenantID: "tid-1"}
 		return []*session{{
 			Context: "contoso", Token: tok,
 			Client: armclient.New(srv.URL, tok.AccessToken, srv.Client()),

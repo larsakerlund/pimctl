@@ -16,6 +16,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/larsakerlund/pimctl/internal/store"
 )
 
 // ARMResource is the v1.0 resource id for Azure Resource Manager.
@@ -73,6 +75,23 @@ func (t Token) Expiry() time.Time {
 func (t Token) UsableFor(margin time.Duration) bool {
 	exp := t.Expiry()
 	return !exp.IsZero() && time.Until(exp) >= margin
+}
+
+// Owner identifies the account whose role data may be reused with this token.
+func (t Token) Owner() store.Owner {
+	return store.Owner{Context: t.Context, TenantID: t.TenantID, PrincipalID: t.PrincipalID}
+}
+
+// CachedOwner identifies the selected account from an already cached token.
+// It never mints a token or calls ARM, so completion can safely use it. Missing
+// identity information or any token-cache error produces no owner.
+func CachedOwner(name string, run Runner) (store.Owner, bool) {
+	tok, ok, err := cachedTokenFor(name, run)
+	if err != nil || !ok {
+		return store.Owner{}, false
+	}
+	owner := tok.Owner()
+	return owner, owner.Valid()
 }
 
 // Label names the token's origin for user-facing output.

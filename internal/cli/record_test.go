@@ -37,21 +37,21 @@ func mkRecordEntry(role, leaf string, endsIn time.Duration) recordEntry {
 func TestRecordRoundTrip(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
-	if got := readRecord("contoso"); len(got) != 0 {
+	if got := readRecord(testOwner("contoso")); len(got) != 0 {
 		t.Fatalf("a fresh state dir should hold no record, got %d", len(got))
 	}
 
 	want := mkRecordEntry("Cost Management Contributor", "contoso-prod", time.Hour)
-	writeRecord("contoso", []recordEntry{want})
+	writeRecord(testOwner("contoso"), []recordEntry{want})
 
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want 1", len(got))
 	}
 	if got[0].Role != want.Role || got[0].Scope != want.Scope || got[0].Key != want.Key {
 		t.Fatalf("round trip lost data: %+v", got[0])
 	}
-	if len(readRecord("globex")) != 0 {
+	if len(readRecord(testOwner("globex"))) != 0 {
 		t.Error("the record must be per-context")
 	}
 }
@@ -63,9 +63,9 @@ func TestRecordPrunesExpiredEntries(t *testing.T) {
 
 	live := mkRecordEntry("Cost Management Contributor", "contoso-prod", time.Hour)
 	expired := mkRecordEntry("Owner", "contoso-test", -time.Minute)
-	writeRecord("contoso", []recordEntry{live, expired})
+	writeRecord(testOwner("contoso"), []recordEntry{live, expired})
 
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want only the live one", len(got))
 	}
@@ -76,8 +76,8 @@ func TestRecordPrunesExpiredEntries(t *testing.T) {
 	// An entry with no end time never expires: a deactivation removes it.
 	noEnd := mkRecordEntry("Owner", "contoso-qa", time.Hour)
 	noEnd.End = time.Time{}
-	writeRecord("contoso", []recordEntry{noEnd})
-	if len(readRecord("contoso")) != 1 {
+	writeRecord(testOwner("contoso"), []recordEntry{noEnd})
+	if len(readRecord(testOwner("contoso"))) != 1 {
 		t.Error("an entry with no end time should be kept")
 	}
 }
@@ -90,19 +90,19 @@ func TestRecordActivationsAndForget(t *testing.T) {
 
 	recordActivations([]result{
 		{
-			Context: "contoso", Role: "Contributor", Scope: scope,
+			Owner: testOwner("contoso"), Context: "contoso", Role: "Contributor", Scope: scope,
 			RoleDefinitionID: roleDef, ScopeName: "Contoso landing zones",
 			Outcome: OutcomeActivated, Until: &end, RequestID: "/req/1",
 		},
 		// A failure must not be recorded as something we hold.
 		{
-			Context: "contoso", Role: "Owner", Scope: scope,
+			Owner: testOwner("contoso"), Context: "contoso", Role: "Owner", Scope: scope,
 			RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/owner",
 			Outcome:          OutcomeFailed,
 		},
 	})
 
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want only the activated one", len(got))
 	}
@@ -112,30 +112,30 @@ func TestRecordActivationsAndForget(t *testing.T) {
 
 	// Re-activating the same role updates rather than duplicating.
 	recordActivations([]result{{
-		Context: "contoso", Role: "Contributor", Scope: scope,
+		Owner: testOwner("contoso"), Context: "contoso", Role: "Contributor", Scope: scope,
 		RoleDefinitionID: roleDef, Outcome: OutcomeAlreadyActive, Until: &end,
 	}})
-	if got := readRecord("contoso"); len(got) != 1 {
+	if got := readRecord(testOwner("contoso")); len(got) != 1 {
 		t.Fatalf("re-activation duplicated the entry: %d", len(got))
 	}
 
 	// Deactivating stops it being held, and leaves a tombstone so ARM's
 	// lagging listing cannot put it back.
 	forgetActivations([]result{{
-		Context: "contoso", Role: "Contributor", Scope: scope,
+		Owner: testOwner("contoso"), Context: "contoso", Role: "Contributor", Scope: scope,
 		RoleDefinitionID: roleDef, Outcome: OutcomeDeactivated,
 	}})
 	if got := heldEntries(); len(got) != 0 {
 		t.Fatalf("the record still holds the role after deactivation: %+v", got)
 	}
-	tomb := readRecord("contoso")
+	tomb := readRecord(testOwner("contoso"))
 	if len(tomb) != 1 || !tomb[0].Revoked() {
 		t.Fatalf("deactivation left no tombstone: %+v", tomb)
 	}
 
 	// Once the ceiling is reached, the tombstone goes too.
 	pastCeiling(t)
-	if got := readRecord("contoso"); len(got) != 0 {
+	if got := readRecord(testOwner("contoso")); len(got) != 0 {
 		t.Fatalf("an expired tombstone survived: %+v", got)
 	}
 }
@@ -149,7 +149,7 @@ func TestReconcileDropsWhatAzureDoesNotConfirm(t *testing.T) {
 	pastCeiling(t)
 
 	stale := mkRecordEntry("Owner", "contoso-test", time.Hour)
-	writeRecord("contoso", []recordEntry{stale})
+	writeRecord(testOwner("contoso"), []recordEntry{stale})
 
 	// Azure reports a different role entirely: one activated in the portal.
 	end := time.Now().Add(30 * time.Minute)
@@ -163,9 +163,9 @@ func TestReconcileDropsWhatAzureDoesNotConfirm(t *testing.T) {
 		DisplayName: "Contoso landing zones", Type: "managementgroup",
 	}
 
-	reconcileRecord("contoso", []activeRow{{Context: "contoso", Assignment: portal}}, nil, nil)
+	reconcileRecord(testOwner("contoso"), []activeRow{{Context: "contoso", Assignment: portal}}, nil, nil)
 
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want exactly what Azure reported", len(got))
 	}
@@ -177,19 +177,19 @@ func TestReconcileDropsWhatAzureDoesNotConfirm(t *testing.T) {
 	}
 
 	// Reconciling against nothing empties the record.
-	reconcileRecord("contoso", nil, nil, nil)
-	if got := readRecord("contoso"); len(got) != 0 {
+	reconcileRecord(testOwner("contoso"), nil, nil, nil)
+	if got := readRecord(testOwner("contoso")); len(got) != 0 {
 		t.Errorf("reconciling against an empty listing left %d entries", len(got))
 	}
 }
 
 func TestReconcileIgnoresOtherContexts(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	writeRecord("globex", []recordEntry{mkRecordEntry("Owner", "contoso-test", time.Hour)})
+	writeRecord(testOwner("globex"), []recordEntry{mkRecordEntry("Owner", "contoso-test", time.Hour)})
 
 	// A fan-out that returned only contoso's rows must not empty globex.
-	reconcileRecord("contoso", nil, nil, nil)
-	if got := readRecord("globex"); len(got) != 1 {
+	reconcileRecord(testOwner("contoso"), nil, nil, nil)
+	if got := readRecord(testOwner("globex")); len(got) != 1 {
 		t.Errorf("reconciling contoso disturbed globex: %d entries", len(got))
 	}
 }
@@ -197,16 +197,16 @@ func TestReconcileIgnoresOtherContexts(t *testing.T) {
 func TestCorruptRecordIsAnEmptyRecord(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
-	writeRecord("contoso", []recordEntry{mkRecordEntry("Owner", "contoso-test", time.Hour)})
+	writeRecord(testOwner("contoso"), []recordEntry{mkRecordEntry("Owner", "contoso-test", time.Hour)})
 
-	path, err := recordPath("contoso")
+	path, err := recordPath(testOwner("contoso"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = writeFile(path, "not json"); err != nil {
 		t.Fatal(err)
 	}
-	if got := readRecord("contoso"); len(got) != 0 {
+	if got := readRecord(testOwner("contoso")); len(got) != 0 {
 		t.Errorf("a corrupt record should read as empty, got %d entries", len(got))
 	}
 }
@@ -240,19 +240,19 @@ func TestReconcileKeepsEntriesAtUnconfirmedScopes(t *testing.T) {
 	pastCeiling(t)
 
 	held := mkRecordEntry("Owner", "contoso-test", time.Hour)
-	writeRecord("contoso", []recordEntry{held})
+	writeRecord(testOwner("contoso"), []recordEntry{held})
 
 	// ARM returned nothing, but contoso-test timed out rather than answering.
 	// Scopes are matched by id: the printed label is a rendering of this, never
 	// the identity itself.
 	reconcileRecord(
-		"contoso",
+		testOwner("contoso"),
 		nil,
 		[]activationScope{{Context: "contoso", ID: "/providers/Microsoft.Management/managementGroups/contoso-test"}},
 		nil,
 	)
 
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 1 {
 		t.Fatalf("an entry at an unconfirmed scope was dropped: %d entries left", len(got))
 	}
@@ -261,8 +261,8 @@ func TestReconcileKeepsEntriesAtUnconfirmedScopes(t *testing.T) {
 	}
 
 	// Once that scope answers cleanly, the stale entry goes.
-	reconcileRecord("contoso", nil, nil, nil)
-	if got := readRecord("contoso"); len(got) != 0 {
+	reconcileRecord(testOwner("contoso"), nil, nil, nil)
+	if got := readRecord(testOwner("contoso")); len(got) != 0 {
 		t.Errorf("a confirmed-empty scope should have dropped the entry, %d left", len(got))
 	}
 }
@@ -283,7 +283,7 @@ func TestAlreadyActiveRerunKeepsTheRequestID(t *testing.T) {
 
 	// What `up` writes when it really activates: a request id, ARM's own start.
 	recordActivations([]result{{
-		Context: "contoso", Role: "Cost Management Contributor", Scope: scope,
+		Owner: testOwner("contoso"), Context: "contoso", Role: "Cost Management Contributor", Scope: scope,
 		ScopeName: "Contoso landing zones", ScopeType: "ManagementGroup",
 		RoleDefinitionID: roleDef, Outcome: OutcomeActivated,
 		RequestID: scope + "/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/req-1",
@@ -292,12 +292,12 @@ func TestAlreadyActiveRerunKeepsTheRequestID(t *testing.T) {
 
 	// What a rerun writes: no request id, no ARM start, ALREADY ACTIVE.
 	recordActivations([]result{{
-		Context: "contoso", Role: "Cost Management Contributor", Scope: scope,
+		Owner: testOwner("contoso"), Context: "contoso", Role: "Cost Management Contributor", Scope: scope,
 		ScopeName: "Contoso landing zones", ScopeType: "ManagementGroup",
 		RoleDefinitionID: roleDef, Outcome: OutcomeAlreadyActive, Until: &end,
 	}})
 
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want 1: %+v", len(got), got)
 	}
@@ -325,17 +325,17 @@ func TestNewActivationReplacesTheOldEntry(t *testing.T) {
 	first.RequestID = "req-1"
 	first.Listed = true
 	first.Key = recordKey(first.Context, first.Scope, first.RoleDefinitionID)
-	writeRecord("contoso", []recordEntry{first})
+	writeRecord(testOwner("contoso"), []recordEntry{first})
 
 	end := time.Now().Add(2 * time.Hour)
 	recordActivations([]result{{
-		Context: "contoso", Role: "Cost Management Contributor", Scope: scope,
+		Owner: testOwner("contoso"), Context: "contoso", Role: "Cost Management Contributor", Scope: scope,
 		ScopeName: "Contoso landing zones", ScopeType: "ManagementGroup",
 		RoleDefinitionID: roleDef, Outcome: OutcomeActivated,
 		RequestID: "req-2", Until: &end,
 	}})
 
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want 1: %+v", len(got), got)
 	}
@@ -406,6 +406,7 @@ func TestRecordLivesInTheContextStore(t *testing.T) {
 	}
 	blob, err := json.Marshal(recordFile{
 		Version: recordVersion,
+		Owner:   testOwner("contoso"),
 		Entries: []recordEntry{mkRecordEntry("Cost Management Contributor", "contoso-prod", time.Hour)},
 	})
 	if err != nil {
@@ -414,7 +415,7 @@ func TestRecordLivesInTheContextStore(t *testing.T) {
 	if err = os.MkdirAll(dir, store.DirMode); err != nil {
 		t.Fatal(err)
 	}
-	oldPath := filepath.Join(dir, "active-contoso.json")
+	oldPath := filepath.Join(dir, "active-"+testOwner("contoso").FileName()+".json")
 	if err = os.WriteFile(oldPath, blob, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -423,28 +424,28 @@ func TestRecordLivesInTheContextStore(t *testing.T) {
 	// inside it from here on.
 	installFakeRunner(t, []string{"contoso"})
 
-	got, err := recordPath("contoso")
+	got, err := recordPath(testOwner("contoso"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(fakeContextStore("contoso"), "pimctl", "active-contoso.json")
+	want := filepath.Join(fakeContextStore("contoso"), "pimctl", "active-"+testOwner("contoso").FileName()+".json")
 	if got != want {
 		t.Errorf("recordPath = %q, want %q", got, want)
 	}
 	if _, err = os.Stat(oldPath); err == nil {
 		t.Error("the record was copied rather than moved; two records for one context disagree eventually")
 	}
-	entries := readRecord("contoso")
+	entries := readRecord(testOwner("contoso"))
 	if len(entries) != 1 || entries[0].Role != "Cost Management Contributor" {
 		t.Errorf("the migrated record lost its entries: %+v", entries)
 	}
 
 	// The shared az login belongs to no context, so its record stays put.
-	bare, err := recordPath("")
+	bare, err := recordPath(testOwner(""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bare != filepath.Join(dir, "active-"+store.AzLoginName+".json") {
+	if bare != filepath.Join(dir, "active-"+testOwner("").FileName()+".json") {
 		t.Errorf("the bare record moved to %q; it has no context to move into", bare)
 	}
 }

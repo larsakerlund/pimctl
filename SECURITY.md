@@ -9,15 +9,24 @@ token minted by `az` and valid for about an hour.
 | Path | Contents | Mode |
 |---|---|---|
 | `$CLOUDCTX_STORE/pimctl/token-<context>.json` | one ARM access token per context | `0600` in a `0700` directory |
-| `$CLOUDCTX_STORE/pimctl/active-<context>.json` | what this machine activated | `0600` |
-| `$XDG_CACHE_HOME/pimctl/eligibilities-<context>.json` | role names and scope ids | `0600` |
-| `$XDG_CACHE_HOME/pimctl/policies-<context>.json` | PIM policy per role and scope | `0600` |
+| `$CLOUDCTX_STORE/pimctl/active-<context>-<account>.json` | what this machine activated | `0600` |
+| `$XDG_CACHE_HOME/pimctl/eligibilities-<context>-<account>.json` | role names and scope ids | `0600` |
+| `$XDG_CACHE_HOME/pimctl/policies-<context>-<account>.json` | PIM policy per role and scope | `0600` |
 | `$XDG_CONFIG_HOME/pimctl/{presets,state}.json` | saved selections, last justification | `0600` |
 
 The first two belong to one cloudctx context, so they live inside that context's
 own store and `cloudctx delete <name>` sweeps them. Without cloudctx, and for
 the shared `az login`, which belongs to no context, they fall back to
 `$XDG_CACHE_HOME/pimctl` and `$XDG_STATE_HOME/pimctl`.
+
+`<account>` is a digest of the context, tenant id, and principal id. Each role
+cache and activation record also stores that ownership and checks it on read.
+Older files without account ownership are ignored; `cache clear --all` can
+remove them. Switching accounts preserves each account's separate state.
+
+Token reuse checks the selected Azure CLI profile's tenant and user against the
+cached token. An absent or unrecognisable account causes a fresh token mint.
+A refresh during a command must preserve its tenant and principal.
 
 Only the first is a credential. The token cache is **refused on read** if its
 mode has been widened, is versioned and carries the context it was minted for,

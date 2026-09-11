@@ -54,7 +54,7 @@ func TestStatusRendersFromTheRecordWithoutWaiting(t *testing.T) {
 		Status:           string(OutcomeActivated),
 	}
 	entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	rows := localActiveRows(&runContext{Sessions: []*session{{
 		Context: "contoso",
@@ -188,7 +188,7 @@ func TestUnconfirmedScopeKeepsItsRole(t *testing.T) {
 		End: end,
 	}
 	entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	out, errOut, err := runCmd(t, "status", "-c", "contoso")
 	if err != nil {
@@ -227,7 +227,7 @@ func TestThrottledScopeIsUnconfirmedNotEmpty(t *testing.T) {
 		End: end,
 	}
 	entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	out, errOut, err := runCmd(t, "status", "-c", "contoso")
 	if err != nil {
@@ -260,7 +260,7 @@ func TestStatusJSONCarriesUnconfirmedScopes(t *testing.T) {
 		End: end,
 	}
 	entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	out, _, err := runCmd(t, "status", "-c", "contoso", "-o", "json")
 	if err != nil {

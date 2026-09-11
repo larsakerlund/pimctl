@@ -123,7 +123,8 @@ are identified by their context names.
 With [cloudctx](https://github.com/eliknut/cloudctx), each context's ARM token
 and activation record live inside that context's own store,
 `$CLOUDCTX_STORE/pimctl/`, so `cloudctx delete <name>` sweeps them with the rest
-of it; files written by an earlier pimctl are moved there on first use. Role
+of it; account-owned files in the fallback directory are moved there on first use.
+Older role caches and records without account ownership are ignored. Role
 listings, policies and anything belonging to the shared `az login` stay under
 `$XDG_CACHE_HOME/pimctl` and `$XDG_STATE_HOME/pimctl`. [SECURITY.md](../SECURITY.md)
 lists every file and its mode.

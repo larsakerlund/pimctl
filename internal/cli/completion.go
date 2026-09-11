@@ -137,7 +137,11 @@ func completeKeys(opts *globalOpts) ([]string, cobra.ShellCompDirective) {
 	}
 	var out []string
 	for _, name := range res.Names {
-		cached, _, ok := cache.Read(name)
+		owner, known := azauth.CachedOwner(name, azauth.DefaultRunner)
+		if !known {
+			continue
+		}
+		cached, _, ok := cache.Read(owner)
 		if !ok {
 			continue
 		}

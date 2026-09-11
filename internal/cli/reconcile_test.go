@@ -31,7 +31,7 @@ func TestUpWritesTheActivationRecord(t *testing.T) {
 		t.Fatalf("up: %v", err)
 	}
 
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 2 {
 		t.Fatalf("the record holds %d entries after activating 2 roles, want 2", len(got))
 	}
@@ -48,7 +48,7 @@ func TestUpWritesTheActivationRecord(t *testing.T) {
 
 	// And status must show them from the record, before any ARM call.
 	rows := localActiveRows(&runContext{Sessions: []*session{{
-		Context: "contoso", Token: &azauth.Token{Context: "contoso"},
+		Context: "contoso", Token: &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1"},
 	}}})
 	if len(rows) != 2 {
 		t.Fatalf("status would show %d roles from the record, want 2", len(rows))
@@ -84,7 +84,7 @@ func TestDownForgetsFromTheActivationRecord(t *testing.T) {
 		Role:             "Cost Management Contributor", End: end,
 	}
 	entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	if _, _, err := runCmd(t, "down", "-c", "contoso", "-y"); err != nil {
 		t.Fatalf("down: %v", err)
@@ -94,7 +94,7 @@ func TestDownForgetsFromTheActivationRecord(t *testing.T) {
 	}
 	// The tombstone stays until ARM agrees, or ARM's lagging listing would
 	// put the role straight back on the next status.
-	tomb := readRecord("contoso")
+	tomb := readRecord(testOwner("contoso"))
 	if len(tomb) != 1 || !tomb[0].Revoked() {
 		t.Errorf("deactivating left no tombstone: %+v", tomb)
 	}
@@ -153,7 +153,7 @@ func TestNewActivationSupersedesDeactivationRecord(t *testing.T) {
 				start := entry.WrittenAt.Add(tc.offset)
 				active.Properties.StartDateTime = &start
 			}
-			writeRecord("contoso", []recordEntry{entry})
+			writeRecord(testOwner("contoso"), []recordEntry{entry})
 			tok := &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1"}
 			sess := &session{Context: "contoso", Token: tok}
 			rc := &runContext{Sessions: []*session{sess}}
@@ -166,8 +166,8 @@ func TestNewActivationSupersedesDeactivationRecord(t *testing.T) {
 			if got := len(added) == 1; got != tc.wantHeld {
 				t.Fatalf("reported new activation=%v want %v", got, tc.wantHeld)
 			}
-			reconcileRecord("contoso", rows, nil, nil)
-			entries := readRecord("contoso")
+			reconcileRecord(testOwner("contoso"), rows, nil, nil)
+			entries := readRecord(testOwner("contoso"))
 			if len(entries) != 1 || entries[0].Revoked() == tc.wantHeld {
 				t.Fatalf("reconciled record did not preserve the correct state: %+v", entries)
 			}
@@ -184,7 +184,7 @@ func TestFreshActivationSurvivesTheListingLag(t *testing.T) {
 	elig, _, entry := lagFixtures(t)
 	f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}}
 	f.install()
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	out, errOut, err := runCmd(t, "status", "-c", "contoso", "--wait")
 	if err != nil {
@@ -212,7 +212,7 @@ func TestFreshDeactivationBeatsTheListingLag(t *testing.T) {
 	f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}, activated: []armclient.Assignment{active}}
 	f.install()
 	entry.Status = recordRevoked
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	out, errOut, err := runCmd(t, "status", "-c", "contoso", "--wait")
 	if err != nil {
@@ -236,7 +236,7 @@ func TestCeilingLetsAzureWin(t *testing.T) {
 		elig, _, entry := lagFixtures(t)
 		f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}}
 		f.install()
-		writeRecord("contoso", []recordEntry{entry})
+		writeRecord(testOwner("contoso"), []recordEntry{entry})
 		pastCeiling(t)
 
 		out, errOut, err := runCmd(t, "status", "-c", "contoso", "--wait")
@@ -259,7 +259,7 @@ func TestCeilingLetsAzureWin(t *testing.T) {
 		f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}, activated: []armclient.Assignment{active}}
 		f.install()
 		entry.Status = recordRevoked
-		writeRecord("contoso", []recordEntry{entry})
+		writeRecord(testOwner("contoso"), []recordEntry{entry})
 		pastCeiling(t)
 
 		out, _, err := runCmd(t, "status", "-c", "contoso", "--wait")
@@ -285,7 +285,7 @@ func TestListingLagIsSettledByTheRequestNotAClock(t *testing.T) {
 	// Ten minutes: far past any fixed window pimctl might have chosen, and far
 	// past the 4.5-minute lag actually observed.
 	entry.WrittenAt = time.Now().Add(-10 * time.Minute)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	out, errOut, err := runCmd(t, "status", "-c", "contoso", "--wait")
 	if err != nil {
@@ -317,7 +317,7 @@ func TestRevokedRequestDropsTheEntryAndSaysSo(t *testing.T) {
 	f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}, putStatus: "Revoked"}
 	f.install()
 	entry.WrittenAt = time.Now().Add(-time.Minute)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	out, errOut, err := runCmd(t, "status", "-c", "contoso", "--wait")
 	if err != nil {
@@ -340,7 +340,7 @@ func TestCeilingExpiryDropsTheEntryAndSaysSo(t *testing.T) {
 	elig, _, entry := lagFixtures(t)
 	f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}}
 	f.install()
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 	pastCeiling(t)
 
 	out, errOut, err := runCmd(t, "status", "-c", "contoso", "--wait")
@@ -367,7 +367,7 @@ func TestConfirmedRowKeepsItsAgeAndLosesTheMarker(t *testing.T) {
 	f.install()
 	written := time.Now().Add(-time.Minute).Truncate(time.Second)
 	entry.WrittenAt = written
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	if _, _, err := runCmd(t, "status", "-c", "contoso", "--wait"); err != nil {
 		t.Fatalf("status: %v", err)
@@ -386,7 +386,7 @@ func TestConfirmedRowKeepsItsAgeAndLosesTheMarker(t *testing.T) {
 
 	// And the next instant render carries no "just activated" marker.
 	rows := localActiveRows(&runContext{Sessions: []*session{{
-		Context: "contoso", Token: &azauth.Token{Context: "contoso"},
+		Context: "contoso", Token: &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1"},
 	}}})
 	if len(rows) != 1 {
 		t.Fatalf("the record produced %d rows, want 1", len(rows))
@@ -441,12 +441,12 @@ func TestRecordSaysWhereItsStartTimeCameFrom(t *testing.T) {
 	roleDef := "/providers/Microsoft.Authorization/roleDefinitions/" + costGUID
 
 	recordActivations([]result{{
-		Context: "contoso", Role: "Cost Management Contributor", Scope: scope,
+		Owner: testOwner("contoso"), Context: "contoso", Role: "Cost Management Contributor", Scope: scope,
 		ScopeName: "Contoso landing zones", ScopeType: "ManagementGroup",
 		RoleDefinitionID: roleDef, Outcome: OutcomeActivated,
 		Since: &armStart, Until: &end,
 	}})
-	got := readRecord("contoso")
+	got := readRecord(testOwner("contoso"))
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want 1", len(got))
 	}
@@ -460,11 +460,11 @@ func TestRecordSaysWhereItsStartTimeCameFrom(t *testing.T) {
 	// Without one — an already-active role ARM told us nothing about — the
 	// entry falls back and says so.
 	recordActivations([]result{{
-		Context: "contoso", Role: "Reader", Scope: scope,
+		Owner: testOwner("contoso"), Context: "contoso", Role: "Reader", Scope: scope,
 		RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + contribGUID,
 		Outcome:          OutcomeAlreadyActive, Until: &end,
 	}})
-	for _, e := range readRecord("contoso") {
+	for _, e := range readRecord(testOwner("contoso")) {
 		if e.Role != "Reader" {
 			continue
 		}
@@ -485,7 +485,7 @@ func TestDebugNamesTheConfirmationStep(t *testing.T) {
 	f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}, putStatus: "Provisioned"}
 	f.install()
 	entry.WrittenAt = time.Now().Add(-time.Minute)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	_, errOut, err := runCmd(t, "status", "-c", "contoso", "--wait", "--debug")
 	if err != nil {

@@ -443,7 +443,7 @@ func eligibleScopes(ctx context.Context, rc *runContext) (scopes []activationSco
 	for _, s := range rc.Sessions {
 		label := s.Token.Label()
 		if !rc.Refresh {
-			if cached, _, ok := cache.Read(label); ok {
+			if cached, _, ok := cache.Read(s.owner()); ok {
 				add(label, cached)
 				continue
 			}
@@ -469,7 +469,7 @@ func eligibleScopes(ctx context.Context, rc *runContext) (scopes []activationSco
 			errs = append(errs, fmt.Errorf("listing eligible roles in %s: %w", label, err))
 			continue
 		}
-		cache.Write(label, elig)
+		cache.Write(s.owner(), elig)
 		add(label, elig)
 	}
 	sortScopes(scopes)

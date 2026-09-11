@@ -36,7 +36,7 @@ func TestActivateBatchTwoRoles(t *testing.T) {
 		if props["requestType"] != "SelfActivate" {
 			t.Errorf("requestType = %v", props["requestType"])
 		}
-		if props["principalId"] != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		if props["principalId"] != "oid-1" {
 			t.Errorf("principalId = %v", props["principalId"])
 		}
 		if props["justification"] != "unit test" {

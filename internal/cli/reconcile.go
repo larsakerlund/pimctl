@@ -6,6 +6,9 @@ package cli
 
 import (
 	"time"
+
+	"github.com/larsakerlund/pimctl/internal/azauth"
+	"github.com/larsakerlund/pimctl/internal/store"
 )
 
 // Keeping the record true. Two things write to it: a run, as each role lands,
@@ -37,10 +40,10 @@ func recordResult(r result) {
 
 // recordActivations merges freshly activated roles into the record.
 func recordActivations(results []result) {
-	byContext := map[string][]recordEntry{}
+	byContext := map[store.Owner][]recordEntry{}
 	now := time.Now()
 	for _, r := range results {
-		if r.Outcome != OutcomeActivated && r.Outcome != OutcomeAlreadyActive {
+		if !r.Owner.Valid() || r.Outcome != OutcomeActivated && r.Outcome != OutcomeAlreadyActive {
 			continue
 		}
 		entry := recordEntry{
@@ -64,7 +67,7 @@ func recordActivations(results []result) {
 			entry.End = *r.Until
 		}
 		entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
-		byContext[r.Context] = append(byContext[r.Context], entry)
+		byContext[r.Owner] = append(byContext[r.Owner], entry)
 	}
 	for context, fresh := range byContext {
 		writeRecord(context, mergeEntries(readRecord(context), fresh))
@@ -79,10 +82,10 @@ func recordActivations(results []result) {
 // still held — the same lag as an activation, in the other direction. The
 // tombstone outranks that listing until it agrees, or the ceiling expires.
 func forgetActivations(results []result) {
-	byContext := map[string][]recordEntry{}
+	byContext := map[store.Owner][]recordEntry{}
 	now := time.Now()
 	for _, r := range results {
-		if r.Outcome != OutcomeDeactivated && r.Outcome != OutcomeNotActive {
+		if !r.Owner.Valid() || r.Outcome != OutcomeDeactivated && r.Outcome != OutcomeNotActive {
 			continue
 		}
 		entry := recordEntry{
@@ -95,7 +98,7 @@ func forgetActivations(results []result) {
 			WrittenAt:        now,
 		}
 		entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
-		byContext[r.Context] = append(byContext[r.Context], entry)
+		byContext[r.Owner] = append(byContext[r.Owner], entry)
 	}
 	for context, gone := range byContext {
 		writeRecord(context, mergeEntries(readRecord(context), gone))
@@ -115,11 +118,12 @@ func forgetActivations(results []result) {
 // Tombstones work the same way in reverse: one is kept while ARM still lists the
 // role it denies, and dropped once the listing agrees it is gone.
 func reconcileRecord(
-	context string,
+	owner store.Owner,
 	active []activeRow,
 	unconfirmedScopes []activationScope,
 	verdicts map[string]entryVerdict,
 ) {
+	context := (azauth.Token{Context: owner.Context}).Label()
 	unknown := unreadScopes(unconfirmedScopes)
 	listed := map[string]activeRow{}
 	for _, a := range active {
@@ -127,9 +131,9 @@ func reconcileRecord(
 			listed[recordKey(a.Context, a.Assignment.Properties.Scope, a.Assignment.Properties.RoleDefinitionID)] = a
 		}
 	}
-	previous := readRecord(context)
+	previous := readRecord(owner)
 	kept, revoked := keepAgainstListing(previous, listed, unknown, verdicts)
-	writeRecord(context, mergeEntries(kept, listedEntries(context, active, previous, revoked)))
+	writeRecord(owner, mergeEntries(kept, listedEntries(context, active, previous, revoked)))
 }
 
 // keepAgainstListing decides which existing entries survive a listing, and

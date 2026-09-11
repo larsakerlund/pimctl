@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/larsakerlund/pimctl/internal/store"
+
 	"github.com/larsakerlund/pimctl/internal/azauth"
 	"github.com/larsakerlund/pimctl/internal/cache"
 )
@@ -20,7 +22,7 @@ func TestCacheClearRemovesBothCachesAndSaysWhatItDidNotDo(t *testing.T) {
 		ExpiresOn:   time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000"),
 		TenantID:    "t",
 	}, azauth.DefaultRunner)
-	cache.Write("contoso", nil)
+	cache.Write(testOwner("contoso"), nil)
 
 	out, _, err := runCmd(t, "cache", "clear")
 	if err != nil {
@@ -35,7 +37,7 @@ func TestCacheClearRemovesBothCachesAndSaysWhatItDidNotDo(t *testing.T) {
 	if tok := readTokenCache(t, "contoso"); tok != nil {
 		t.Error("the token cache survived")
 	}
-	if _, _, ok := cache.Read("contoso"); ok {
+	if _, _, ok := cache.Read(testOwner("contoso")); ok {
 		t.Error("the listing cache survived")
 	}
 }
@@ -66,7 +68,7 @@ func TestCacheClearKeepsTheActivationRecord(t *testing.T) {
 	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()}
 	f.install()
 	_, _, entry := lagFixtures(t)
-	writeRecord("contoso", []recordEntry{entry})
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
 
 	out, _, err := runCmd(t, "cache", "clear")
 	if err != nil {
@@ -84,7 +86,7 @@ func TestCacheClearKeepsTheActivationRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cache clear --all: %v", err)
 	}
-	if got := readRecord("contoso"); len(got) != 0 {
+	if got := readRecord(testOwner("contoso")); len(got) != 0 {
 		t.Errorf("cache clear --all left %d record entries", len(got))
 	}
 	// Counted in activations and named by context: two files holding three
@@ -114,7 +116,7 @@ func TestCacheClearAllNamesEveryContextItForgot(t *testing.T) {
 	// contoso holds one live activation; globex's has expired but its file is
 	// still there.
 	live := mkRecordEntry("Cost Management Contributor", "contoso-prod", time.Hour)
-	writeRecord("contoso", []recordEntry{live})
+	writeRecord(testOwner("contoso"), []recordEntry{live})
 	expired := mkRecordEntry("Owner", "contoso-test", time.Hour)
 	expired.Context = "globex"
 	expired.End = time.Now().Add(-time.Hour)
@@ -136,7 +138,22 @@ func TestCacheClearAllNamesEveryContextItForgot(t *testing.T) {
 	if !strings.Contains(errOut, "may not show roles you are still holding") {
 		t.Errorf("the warning is missing: %q", errOut)
 	}
-	if got := readRecord("globex"); len(got) != 0 {
+	if got := readRecord(testOwner("globex")); len(got) != 0 {
 		t.Errorf("globex's record survived: %+v", got)
+	}
+}
+
+func TestAccountRecordFileLabels(t *testing.T) {
+	for _, name := range []string{"", "contoso-test"} {
+		owner := testOwner(name)
+		want := name
+		if name == "" {
+			want = "the shared az login"
+		}
+		for _, filename := range []string{"active-" + owner.FileName() + ".json", "active-" + store.FileName(name) + ".json"} {
+			if got := contextFromRecordFile(filename); got != want {
+				t.Errorf("contextFromRecordFile(%q) = %q, want %q", filename, got, want)
+			}
+		}
 	}
 }
