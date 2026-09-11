@@ -49,15 +49,9 @@ checksum:
   algorithm: sha256
 
 changelog:
-  # The hand-written CHANGELOG.md is the one that explains why; this is the
-  # commit list, which is worth having but is not the same document.
-  use: git
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
+  # The release workflow supplies the tagged version's CHANGELOG.md section
+  # through --release-notes, keeping maintenance commits out of user-facing notes.
+  disable: true
 
 release:
   draft: false

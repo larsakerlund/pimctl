@@ -9,6 +9,25 @@ The exit-code contract will not change without a major version.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-11
+
+Enable a project's required Azure roles with `pimctl up`, including access at
+a narrower scope than your eligibility.
+
+### Added
+
+- `pimctl init` creates a shareable `.pimctl.yaml` by choosing scopes and roles,
+  or importing a preset. It verifies the selection without activating roles.
+- `pimctl up` discovers the project file and checks its tenant, eligibility and
+  policies before requesting activation. Repeated runs preserve existing
+  activation windows. Use `--no-project` to return to ordinary selection.
+- `status --project` reports each requirement, including inactive or uncertain
+  roles. `down --project` deactivates the file's exact targets, leaving broader
+  activations alone. Bare `status` and `down` retain their existing behavior.
+- `up --key KEY --at SCOPE` activates an eligible role at a narrower scope after
+  Azure verifies eligibility there. Saved presets retain the narrower target;
+  failed verification never falls back to broader access.
+
 ## [0.3.0] - 2026-09-11
 
 Security and correctness fixes for account isolation, activation state, and
@@ -219,6 +238,7 @@ its last known state and is named.
 - macOS and Linux only. Paths, file modes and the pty tests assume a POSIX
   machine.
 
-[Unreleased]: https://github.com/larsakerlund/pimctl/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/larsakerlund/pimctl/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.4.0
 [0.3.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.3.0
 [0.2.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.2.0

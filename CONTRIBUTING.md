@@ -63,6 +63,8 @@ not used.
 
 If a change alters behaviour, it comes with a test that fails without it, and a
 `CHANGELOG.md` entry under `## [Unreleased]`.
+Entries describe what changes for users; omit documentation updates, refactoring
+and other maintenance that leaves behaviour unchanged.
 
 ## Reporting
 
