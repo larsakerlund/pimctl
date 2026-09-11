@@ -13,6 +13,6 @@
 # macOS writes one of these into every directory it is shown.
 .DS_Store
 
-# The live-tenant envelope named in CLAUDE.md: whose tenant, which roles, which
+# The live-tenant envelope named in AGENTS.md: whose tenant, which roles, which
 # scopes. That belongs to whoever runs it, not to the repository.
 CLAUDE.local.md

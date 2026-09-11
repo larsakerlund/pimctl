@@ -258,7 +258,7 @@ func isProseGroup(group *ast.CommentGroup) bool {
 // memberFindings reports struct fields and interface methods with nothing said
 // about them.
 //
-// CLAUDE.md asks for a comment on any field whose meaning is not self-evident,
+// AGENTS.md asks for a comment on any field whose meaning is not self-evident,
 // which no checker can judge, so the mechanical rule is stricter: every field
 // and every interface method carries a comment, doc or trailing. Nested
 // anonymous structs are walked too, because a JSON shape's inner fields are

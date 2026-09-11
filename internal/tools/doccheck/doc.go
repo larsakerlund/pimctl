@@ -3,7 +3,7 @@
 //
 // No linter golangci-lint ships requires a doc comment on an *unexported*
 // declaration, and none of them requires a file to say what it owns. Both are
-// house rules here (see CLAUDE.md), so they need their own checker. doccheck
+// house rules here (see AGENTS.md), so they need their own checker. doccheck
 // parses every non-generated Go file in the packages it is pointed at and
 // reports four things:
 //

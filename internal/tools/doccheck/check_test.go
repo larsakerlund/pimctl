@@ -249,7 +249,7 @@ func TestVacuousDocComments(t *testing.T) {
 	}
 }
 
-// TestStructFieldsAndInterfaceMethods: CLAUDE.md asks for a comment on any
+// TestStructFieldsAndInterfaceMethods: AGENTS.md asks for a comment on any
 // field whose meaning is not self-evident, which no checker can judge, so the
 // mechanical rule is that every field and every interface method carries one.
 // Nested anonymous structs count, because a wire format's inner fields are

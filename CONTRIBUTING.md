@@ -69,6 +69,6 @@ If a change alters behaviour, it comes with a test that fails without it, and a
 Bugs and questions: open an issue. Anything sensitive:
 [SECURITY.md](SECURITY.md).
 
-`CLAUDE.md` is the long version of all of this — conventions, ARM facts that are
+`AGENTS.md` is the long version of all of this — conventions, ARM facts that are
 easy to get wrong, and a map of the layout. It is written for coding agents, and
 it is the best thing to read before a first change.
