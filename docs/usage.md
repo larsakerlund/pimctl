@@ -71,8 +71,11 @@ $ pimctl status -o json | jq '{unconfirmed: .unconfirmedScopes, held: [.roles[] 
 ```
 
 `status -o json` is an object, not an array. `state` is `confirmed`,
-`confirming` (activated here, Azure's listing has not caught up — the role *is*
-held) or `unconfirmed` (Azure did not answer for that scope).
+`confirming` (a recent local activation that Azure's listing has not confirmed)
+or `unconfirmed` (local state without current listing confirmation). pimctl
+checks confirming rows against their schedule requests where possible, but
+retains them when that check is unavailable too; the marker alone is not proof
+of current access.
 **An empty `roles` with a non-empty `unconfirmedScopes` means *unknown*, not
 *nothing*.** See [the propagation window](design.md#the-propagation-window).
 
@@ -108,6 +111,19 @@ then `rm ~/.local/bin/pimctl`. Presets and remembered justification remain in
 `$XDG_CONFIG_HOME/pimctl` (normally `~/.config/pimctl`); remove that directory
 only if you also want to discard them. Remove any shell completion you installed
 separately.
+
+## Agent skill
+
+The [pimctl skill](../skills/pimctl/SKILL.md) guides coding agents through account
+selection, role changes, and interpreting incomplete or pending results.
+Install it with the [Skills CLI](https://github.com/vercel-labs/skills):
+
+```sh
+npx skills add larsakerlund/pimctl --skill pimctl
+```
+
+This installs agent instructions; install the pimctl binary separately.
+From a local clone, use `npx skills add ./ --skill pimctl`.
 
 ## Which login a run uses
 
@@ -146,7 +162,7 @@ spawns cloudctx and is unaffected.
 | `requires ticket information` | re-run with `--ticket-number` and `--ticket-system` |
 | `at least 5 minutes` | PIM will not deactivate a role activated less than five minutes ago |
 | `not finished propagating` | the role is **still active**; wait a minute and retry the deactivation |
-| `N scope(s) unconfirmed (slow ARM)` | the listing is incomplete, not empty — `pimctl status --wait` reads it properly |
+| `N scope(s) unconfirmed (slow ARM)` | the listing is incomplete, not empty — `pimctl status --wait` allows longer reads but can still return incomplete results |
 | `status` shows nothing you believe you hold | deactivate it **by name**; a named `down` asks ARM regardless of the listing |
 
 Longer explanations, and the measurements behind these behaviours, are in

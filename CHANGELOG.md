@@ -9,6 +9,11 @@ The exit-code contract will not change without a major version.
 
 ## [Unreleased]
 
+### Added
+
+- An installable `pimctl` agent skill covering account selection, scoped role
+  changes, and interpretation of incomplete or pending results.
+
 ### Changed
 
 - Shortened the README, corrected usage and storage documentation, and removed
