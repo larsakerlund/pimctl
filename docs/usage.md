@@ -91,7 +91,12 @@ of current access.
 With `--no-wait`, exit 0 can also mean requests were submitted without waiting
 for completion. Check their state before assuming access was granted or removed.
 
-## Other installation options
+## Installation
+
+The installer linked from the README downloads the release for your platform,
+verifies its SHA-256 checksum, and installs it in `~/.local/bin`. Follow its PATH
+instructions if needed. Archives are also available from
+[Releases](https://github.com/larsakerlund/pimctl/releases).
 
 Install from Go source:
 
