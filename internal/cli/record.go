@@ -115,6 +115,14 @@ func (e recordEntry) Expired(now time.Time) bool {
 // Revoked reports whether the entry is a tombstone for a role given up here.
 func (e recordEntry) Revoked() bool { return e.Status == recordRevoked }
 
+// Denies reports whether a tombstone can suppress a listed activation.
+// A window starting after the deactivation is new access and must be shown.
+// Without a start time, the listing supplies no evidence of a new window.
+func (e recordEntry) Denies(a armclient.Assignment) bool {
+	start := a.Properties.StartDateTime
+	return e.Revoked() && (start == nil || !start.After(e.WrittenAt))
+}
+
 // Confirming reports whether ARM's listing has yet to catch up with an
 // activation this machine made. Such an entry is not evidence-free: it is
 // checked against its own schedule request before anything is concluded.

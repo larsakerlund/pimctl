@@ -132,6 +132,49 @@ func lagFixtures(t *testing.T) (armclient.Eligibility, armclient.Assignment, rec
 	return elig, a, e
 }
 
+func TestNewActivationSupersedesDeactivationRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		offset             time.Duration
+		hasStart, wantHeld bool
+	}{
+		{"old activation", -time.Hour, true, false},
+		{"same instant", 0, true, false},
+		{"new activation", time.Minute, true, true},
+		{"unknown start", 0, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			elig, active, entry := lagFixtures(t)
+			f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{elig}}
+			f.install()
+			entry.Status = recordRevoked
+			entry.WrittenAt = time.Now().Add(-10 * time.Minute)
+			if tc.hasStart {
+				start := entry.WrittenAt.Add(tc.offset)
+				active.Properties.StartDateTime = &start
+			}
+			writeRecord("contoso", []recordEntry{entry})
+			tok := &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1"}
+			sess := &session{Context: "contoso", Token: tok}
+			rc := &runContext{Sessions: []*session{sess}}
+			local := readLocalRecord(rc)
+			rows := []activeRow{{Context: "contoso", Session: sess, Assignment: active}}
+			if got := len(mergeActive(local, rows, nil)) == 1; got != tc.wantHeld {
+				t.Fatalf("held=%v want %v", got, tc.wantHeld)
+			}
+			added, _ := statusDelta(local, rows, nil)
+			if got := len(added) == 1; got != tc.wantHeld {
+				t.Fatalf("reported new activation=%v want %v", got, tc.wantHeld)
+			}
+			reconcileRecord("contoso", rows, nil, nil)
+			entries := readRecord("contoso")
+			if len(entries) != 1 || entries[0].Revoked() == tc.wantHeld {
+				t.Fatalf("reconciled record did not preserve the correct state: %+v", entries)
+			}
+		})
+	}
+}
+
 // TestFreshActivationSurvivesTheListingLag: ARM's per-scope read lags an
 // activation by up to two minutes — measured on a real tenant, a PUT accepted at
 // 13:12:02Z was absent at 13:13:42 and present at 13:14:06. Reconciling against

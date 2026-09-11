@@ -455,7 +455,9 @@ func TestReportStatusDelta(t *testing.T) {
 		{
 			name: "a role given up here is not someone else's activation",
 			local: localRecord{
-				revoked: map[string]bool{activeSelectionKey(held): true},
+				revoked: map[string]recordEntry{
+					activeSelectionKey(held): {Status: recordRevoked, WrittenAt: time.Now()},
+				},
 			},
 			active: []activeRow{held},
 			want:   []string{"confirmed 0 against Azure"},

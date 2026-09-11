@@ -24,10 +24,17 @@ import (
 type localRecord struct {
 	rows []activeRow // what the record believes is held, sorted as the tables sort.
 	// revoked holds selection keys given up here that ARM may still be listing.
-	revoked map[string]bool
+	revoked map[string]recordEntry
 	// verdicts is what ARM's schedule requests said about the rows its listing
 	// has not caught up with. Empty before the listing has been read at all.
 	verdicts map[string]entryVerdict
+}
+
+// denies reports whether a deactivation record still contradicts this listing
+// row. A later activation window supersedes the earlier deactivation.
+func (lr localRecord) denies(r activeRow) bool {
+	entry, ok := lr.revoked[activeSelectionKey(r)]
+	return ok && entry.Denies(r.Assignment)
 }
 
 // stands reports whether a row from the record survives a listing that does not
@@ -49,14 +56,14 @@ func (lr localRecord) stands(r activeRow, scopeUnread bool) bool {
 
 // readLocalRecord renders this machine's record for every open session.
 func readLocalRecord(rc *runContext) localRecord {
-	lr := localRecord{revoked: map[string]bool{}}
+	lr := localRecord{revoked: map[string]recordEntry{}}
 	now := time.Now()
 	for _, s := range rc.Sessions {
 		label := s.Token.Label()
 		for _, e := range readRecord(label) {
 			row := recordRow(label, s, e)
 			if e.Revoked() {
-				lr.revoked[activeSelectionKey(row)] = true
+				lr.revoked[activeSelectionKey(row)] = e
 				continue
 			}
 			if e.Confirming(now) {
@@ -122,7 +129,7 @@ func mergeActive(local localRecord, active []activeRow, unconfirmed []string) []
 	out := make([]activeRow, 0, len(active))
 	for _, r := range active {
 		key := activeSelectionKey(r)
-		if local.revoked[key] {
+		if local.denies(r) {
 			continue
 		}
 		seen[key] = true

@@ -146,7 +146,7 @@ func reportStatusDelta(
 	added, dropped := statusDelta(local, active, unconfirmed)
 	armCount := 0
 	for _, r := range active {
-		if !local.revoked[activeSelectionKey(r)] {
+		if !local.denies(r) {
 			armCount++
 		}
 	}
@@ -194,7 +194,7 @@ func statusDelta(local localRecord, active []activeRow, unconfirmed []string) (a
 	}
 
 	for k, r := range armKeys {
-		if local.revoked[k] {
+		if local.denies(r) {
 			continue // given up here; ARM's listing has not caught up.
 		}
 		if _, ok := localKeys[k]; !ok {

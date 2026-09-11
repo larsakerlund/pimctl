@@ -19,6 +19,8 @@ The exit-code contract will not change without a major version.
   matches both tenant and user. Missing account information forces a fresh token.
 - Deactivation returns a failure when scope reads are incomplete and no longer
   describes an unread scope as having no active roles.
+- A deactivation record no longer hides an activation whose Azure-reported
+  window starts after that deactivation.
 
 - **`install.sh` no longer uses the GitHub API when it has no token.** The tag
   comes from where `/releases/latest` redirects, and the files from the

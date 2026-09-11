@@ -117,10 +117,10 @@ func forgetActivations(results []result) {
 // role it denies, and dropped once the listing agrees it is gone.
 func reconcileRecord(context string, active []activeRow, unconfirmedScopes []string, verdicts map[string]entryVerdict) {
 	unknown := unreadScopes(unconfirmedScopes)
-	listed := map[string]bool{}
+	listed := map[string]activeRow{}
 	for _, a := range active {
 		if a.Context == context {
-			listed[recordKey(a.Context, a.Assignment.Properties.Scope, a.Assignment.Properties.RoleDefinitionID)] = true
+			listed[recordKey(a.Context, a.Assignment.Properties.Scope, a.Assignment.Properties.RoleDefinitionID)] = a
 		}
 	}
 	previous := readRecord(context)
@@ -132,7 +132,8 @@ func reconcileRecord(context string, active []activeRow, unconfirmedScopes []str
 // returns the tombstones among them so ARM's own rows can be filtered by them.
 func keepAgainstListing(
 	previous []recordEntry,
-	listed, unknown map[string]bool,
+	listed map[string]activeRow,
+	unknown map[string]bool,
 	verdicts map[string]entryVerdict,
 ) (kept []recordEntry, revoked map[string]bool) {
 	now := time.Now()
@@ -140,15 +141,16 @@ func keepAgainstListing(
 	kept = make([]recordEntry, 0, len(previous))
 	for _, e := range previous {
 		scopeUnread := unknown[strings.ToLower(e.Scope)]
+		row, isListed := listed[e.Key]
 		switch {
 		case e.Revoked():
 			// Keep denying the role until ARM stops listing it — or while its
 			// scope went unread, which proves nothing either way.
-			if listed[e.Key] || scopeUnread {
+			if isListed && e.Denies(row.Assignment) || !isListed && scopeUnread {
 				revoked[e.Key] = true
 				kept = append(kept, e)
 			}
-		case listed[e.Key]:
+		case isListed:
 			// ARM's own row replaces it below; see listedEntries.
 			continue
 		case scopeUnread, e.Confirming(now) && verdicts[entryKey(e)] != verdictGone:
