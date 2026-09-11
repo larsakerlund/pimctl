@@ -1,4 +1,4 @@
-// [Target], one role to give up, and the three ways one can be named: from the
+// [target], one role to give up, and the three ways one can be named: from the
 // activation listing, from the eligibility listing, or from a preset. Where a
 // target came from is what decides how ARM's answer is read, which is why the
 // three constructors live together. Choosing which targets to act on is
@@ -73,7 +73,7 @@ func targetFromEligible(r row) target {
 // derived from the scope id.
 func targetFromPreset(e config.PresetEntry) target {
 	return target{
-		Context:          e.Context,
+		Context:          contextLabel(e.Context),
 		Scope:            e.Scope,
 		RoleDefinitionID: e.RoleDefinitionID,
 		RoleName:         e.RoleName,

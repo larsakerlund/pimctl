@@ -163,6 +163,14 @@ func LoadPresets() (*Presets, error) {
 	if ps.Presets == nil {
 		ps.Presets = map[string][]PresetEntry{}
 	}
+	// Older presets stored the shared login's display label as a context name.
+	for _, entries := range ps.Presets {
+		for i := range entries {
+			if entries[i].Context == "(default)" {
+				entries[i].Context = ""
+			}
+		}
+	}
 	return ps, nil
 }
 

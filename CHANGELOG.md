@@ -27,6 +27,8 @@ The exit-code contract will not change without a major version.
   tenant or principal instead of continuing an existing plan under a new account.
 - Eligibility and policy caches, and activation records, are bound to the
   authenticated context, tenant, and principal. Older unbound files are ignored.
+- Presets saved under the shared Azure CLI login replay using that login,
+  including older presets that stored `(default)` as their context name.
 
 - **`install.sh` no longer uses the GitHub API when it has no token.** The tag
   comes from where `/releases/latest` redirects, and the files from the

@@ -33,10 +33,10 @@ const (
 
 // resolution is the outcome of working out which contexts to act on.
 type resolution struct {
-	// Names are the cloudctx contexts to open. Empty when Bare is set.
+	// Names are contexts to open; an empty member means shared az in a mixed
+	// preset. The slice is empty when Bare selects only shared az.
 	Names []string
-	// Bare means "use the ambient az login" — only ever set by an explicit
-	// --bare-az, never as a fallback.
+	// Bare selects only the shared Azure CLI login.
 	Bare bool
 	// Source is how the choice was made, so the notice can say why these
 	// contexts and not others.
@@ -52,13 +52,17 @@ func (r resolution) Describe() string {
 	if r.Bare {
 		return ""
 	}
-	switch len(r.Names) {
+	names := make([]string, len(r.Names))
+	for i, name := range r.Names {
+		names[i] = contextLabel(name)
+	}
+	switch len(names) {
 	case 0:
 		return ""
 	case 1:
-		return fmt.Sprintf("using context %s (from %s)", r.Names[0], r.Source)
+		return fmt.Sprintf("using context %s (from %s)", names[0], r.Source)
 	default:
-		return fmt.Sprintf("using %d contexts (from %s): %s", len(r.Names), r.Source, strings.Join(r.Names, ", "))
+		return fmt.Sprintf("using %d contexts (from %s): %s", len(names), r.Source, strings.Join(names, ", "))
 	}
 }
 
@@ -116,8 +120,8 @@ func checkContextFlags(flagContexts []string, allContexts bool, bareAz bareAzMod
 }
 
 // resolveContexts works out which contexts to act on, in strict precedence:
-// explicit -c, then --all-contexts, then --bare-az, then the contexts a named
-// preset covers, then $CLOUDCTX_CONTEXT, and finally an error.
+// explicit -c, --all-contexts, or --bare-az (mutually exclusive), then a named
+// preset's contexts, then $CLOUDCTX_CONTEXT, then the shared Azure CLI login.
 //
 // presetContexts is empty unless the command was given a preset.
 func resolveContexts(
@@ -155,7 +159,10 @@ func resolveContexts(
 	// match none of its entries. This is what made `pimctl activate --preset X`
 	// fail with "no eligible role matched" whenever -c was omitted.
 	if len(presetContexts) > 0 {
-		return withSupportedCloudctx(resolution{Names: dedupeStrings(presetContexts), Source: SourcePreset})
+		if len(presetContexts) == 1 && contextName(presetContexts[0]) == "" {
+			return resolution{Bare: true, Source: SourcePreset}, nil
+		}
+		return withSupportedCloudctx(resolution{Names: presetContexts, Source: SourcePreset})
 	}
 	if inContext != "" {
 		return withSupportedCloudctx(resolution{Names: []string{inContext}, Source: SourceEnv})
@@ -212,12 +219,29 @@ func dedupeStrings(in []string) []string {
 // presetContexts lists the distinct contexts a preset's entries name, in the
 // order they first appear.
 func presetContexts(entries []config.PresetEntry) []string {
+	seen := map[string]bool{}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		names = append(names, e.Context)
+		name := contextName(e.Context)
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
 	}
-	return dedupeStrings(names)
+	return names
 }
+
+// contextName converts the shared-login display label used by rows and older
+// presets into its stored name. An empty name explicitly selects shared az.
+func contextName(label string) string {
+	if label == "(default)" {
+		return ""
+	}
+	return label
+}
+
+// contextLabel renders a stored preset context the same way as session rows.
+func contextLabel(name string) string { return (azauth.Token{Context: contextName(name)}).Label() }
 
 // loadPreset reads one preset by name.
 func loadPreset(name string) ([]config.PresetEntry, error) {

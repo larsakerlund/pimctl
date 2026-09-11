@@ -187,7 +187,7 @@ func applyPreset(rows []row, entries []config.PresetEntry) (selected []row, miss
 		byKey[r.Key()] = r
 	}
 	for _, e := range entries {
-		k := rowKey(e.Context, e.Scope, armclient.RoleDefinitionGUID(e.RoleDefinitionID))
+		k := rowKey(contextLabel(e.Context), e.Scope, armclient.RoleDefinitionGUID(e.RoleDefinitionID))
 		if r, ok := byKey[k]; ok {
 			selected = append(selected, r)
 			continue
@@ -210,7 +210,7 @@ func toPresetEntries(rows []row) []config.PresetEntry {
 	out := make([]config.PresetEntry, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, config.PresetEntry{
-			Context:          r.Context,
+			Context:          contextName(r.Context),
 			Scope:            r.Elig.Properties.Scope,
 			RoleDefinitionID: r.Elig.Properties.RoleDefinitionID,
 			RoleName:         r.Elig.RoleName(),

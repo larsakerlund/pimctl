@@ -10,12 +10,58 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/azauth"
+	"github.com/larsakerlund/pimctl/internal/config"
 )
+
+func TestSharedLoginPresetRoundTripWithoutCloudctx(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(strconv.FormatBool(legacy), func(t *testing.T) {
+			installBareARM(t, twoLowImpactRoles())
+			if _, _, err := runCmd(t, "up", "--all", "--save-preset", "daily", "-j", "work", "-y"); err != nil {
+				t.Fatal(err)
+			}
+			ps, err := config.LoadPresets()
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries, ok := ps.Get("daily")
+			if !ok || len(entries) != 2 {
+				t.Fatalf("saved selection missing: %+v", entries)
+			}
+			for _, entry := range entries {
+				if entry.Context != "" {
+					t.Fatalf("stored display label instead of login identity: %q", entry.Context)
+				}
+			}
+			if legacy {
+				for i := range entries {
+					entries[i].Context = "(default)"
+				}
+				ps.Set("daily", entries)
+				if err := config.SavePresets(ps); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A preset pins shared az even when a different context is in the shell.
+			t.Setenv(envContext, "unrelated-shell-context")
+			for _, args := range [][]string{{"up", "daily", "-j", "work", "-y"}, {"down", "daily", "-y"}} {
+				_, stderr, err := runCmd(t, args...)
+				if err != nil {
+					t.Fatalf("preset replay %v failed: %v; %s", args, err, stderr)
+				}
+				if !strings.Contains(stderr, "using az login") {
+					t.Fatalf("replay selected another login: %s", stderr)
+				}
+			}
+		})
+	}
+}
 
 // installBareARM points pimctl at a fake ARM through the shared-login path,
 // with cloudctx absent. It is deliberately not fakeARM.install, which fakes the

@@ -106,6 +106,9 @@ func describePreset(entries []config.PresetEntry) string {
 		return "empty"
 	}
 	ctxs := presetContexts(entries)
+	for i, name := range ctxs {
+		ctxs[i] = contextLabel(name)
+	}
 	return strings.Join(ctxs, ",") + ": " + pluralRoles(len(entries))
 }
 
