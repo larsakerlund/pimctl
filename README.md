@@ -15,19 +15,13 @@ curl -fsSL https://raw.githubusercontent.com/larsakerlund/pimctl/main/install.sh
 Sign in with `az login`, then:
 
 ```sh
-pimctl ls            # list eligible roles
-pimctl up --for 1h   # pick roles to activate
-pimctl status        # show active roles
-pimctl down          # deactivate listed roles, after confirmation
+pimctl ls           # list eligible roles
+pimctl up --for 1h  # activate roles
+pimctl status       # show active roles
+pimctl down         # deactivate roles, after confirmation
 ```
 
-For a project, run `pimctl init` to choose its scopes and roles, then commit the
-generated `.pimctl.yaml`. Teammates can run `pimctl up` with their own login.
-Use `pimctl status --project` or `pimctl down --project` for that file’s exact
-roles; bare `status` and `down` keep their usual meaning.
-
-See the [usage guide](docs/usage.md) for project access, presets, scripting, multiple tenants,
-and troubleshooting.
+See the [usage guide](docs/usage.md) for more options and examples.
 
 ## Agent skill
 

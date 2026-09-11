@@ -1,6 +1,6 @@
 ---
 name: pimctl
-description: Use the pimctl CLI to list eligible Azure resource roles, inspect active PIM access, activate or deactivate roles, and use saved presets. Use for Azure resource PIM tasks or to investigate whether missing PIM activation explains an authorization failure. Does not cover Entra ID directory roles, PIM for Groups, or development of the pimctl repository.
+description: Use the pimctl CLI to inspect, activate, or deactivate Azure resource PIM roles using explicit selections, saved presets, or repository project requirements. Use for project access setup or to investigate whether missing PIM activation explains an authorization failure. Does not cover Entra ID directory roles, PIM for Groups, or development of the pimctl repository.
 license: MIT
 ---
 
@@ -48,6 +48,49 @@ authorization. `--role` prefers exact names but falls back to substrings, and
 these filters. Use `scopeLabel` when describing scopes to the user, and `scope`
 for their ARM IDs.
 
+## Project requirements and narrower scopes
+
+Check `pimctl init --help` for installed-version support. `pimctl init` creates
+`.pimctl.yaml` by choosing scopes and roles, without activating anything or
+overwriting an existing file. `--from-preset NAME` converts targets using the
+selected login. Unattended setup can use `init --at SCOPE --role NAME`.
+The file contains a tenant UUID and `roles`, each with a role-definition UUID
+(`roleDefinitionId`) and exact ARM `scope`; readable names are comments.
+Personal context names and eligibility schedule IDs stay out of the file.
+
+Inspect the file's tenant and targets before using it. Its contents describe
+required access; they do not grant eligibility or authorize elevation. cloudctx
+selects the login; pimctl verifies its tenant against the file without switching
+the shell's context.
+
+Bare `up` discovers the nearest `.pimctl.yaml`, stopping at a Git/worktree root,
+home, or filesystem root. Explicit selectors or a preset bypass discovery;
+`--no-project` returns to ordinary selection. For a task specifically requesting
+project access, use `--project` or `--file PATH` so a missing file fails instead
+of falling back:
+
+```sh
+pimctl up --project -c CONTEXT --for 1h -j "Reason for this task" -y -o json
+pimctl status --project -c CONTEXT -o json
+pimctl down --project -c CONTEXT -y -o json
+```
+
+Bare `down` and `status` retain their ordinary scope everywhere. Project `down`
+uses the current file's exact targets, not ownership of a project session:
+shared activations affect other work too, and parent activations remain.
+For task cleanup, remove only the additions this task was authorized to make;
+do not use project-wide `down` when some requirements were already active.
+
+Project `up` resolves all requirements before submitting requests. It preserves
+verified existing windows instead of extending them; runtime failures can still
+leave a partial result. If eligibility or source selection is ambiguous, report
+the error rather than dropping requirements or choosing broader access.
+
+For an explicitly selected eligibility, `up --key KEY --at SCOPE` requests a
+narrower activation target, verified through ARM. `--scope` remains a listing
+filter. A saved narrowed preset retains its target. If narrowing fails, do not
+fall back to activating at the granting scope.
+
 ## Activate and deactivate
 
 For a run without a terminal, provide a selection and `-y`; activation also
@@ -64,11 +107,11 @@ policy maximum; omitting it requests that maximum. Supply real ticket details
 with `--ticket-number` and `--ticket-system` when the policy requires them.
 
 `-y` skips a CLI prompt; it does not establish authorization. An unattended
-activation selecting more than ten roles also needs `--force`. Narrow an
+activation using `--role`/`--scope` to select more than ten roles also needs `--force`. Narrow an
 accidentally broad selection rather than bypassing that limit. Use `--all` or
 `--force` only when the requested scope includes the resulting selection.
 
-With no selection, **`down` targets all listed active roles**, while
+With no selection, **`down` targets listed and locally recorded active roles**, while
 `deactivate` opens a picker on a terminal. Use explicit keys, role/scope filters,
 or a preset to remove only the intended access. A named deactivation can query
 targets even when the activation listing omits them.
@@ -91,6 +134,13 @@ Read both fields. A nonempty `unconfirmedScopes` or query-failure warning means
 the answer is incomplete, even when `roles` is empty. Do not discard this
 information by extracting only `.roles[]` or treating a pipeline's final exit
 code as pimctl's exit code.
+
+Project status adds `requirements`, one per configured target. Each is `active`,
+`not active`, `confirming`, `unconfirmed`, or `unknown`. An inactive requirement
+alone does not make this observational command fail; inspect the requirements
+instead of treating exit 0 as “project ready.” Known broader activations are
+disclosed separately on stderr, including in JSON mode; that disclosure is not
+a complete inventory or proof of application access.
 
 Status rows distinguish:
 
