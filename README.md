@@ -21,7 +21,12 @@ pimctl status        # show active roles
 pimctl down          # deactivate listed roles, after confirmation
 ```
 
-See the [usage guide](docs/usage.md) for presets, scripting, multiple tenants,
+For a project, run `pimctl init` to choose its scopes and roles, then commit the
+generated `.pimctl.yaml`. Teammates can run `pimctl up` with their own login.
+Use `pimctl status --project` or `pimctl down --project` for that file’s exact
+roles; bare `status` and `down` keep their usual meaning.
+
+See the [usage guide](docs/usage.md) for project access, presets, scripting, multiple tenants,
 and troubleshooting.
 
 ## Agent skill

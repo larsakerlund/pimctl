@@ -1,0 +1,44 @@
+#!/usr/bin/expect -f
+# Verify init's single-choice picker filters and accepts the highlighted scope
+# without a toggle, and erases itself on completion. No Azure calls occur.
+set bin [lindex $argv 0]
+set timeout 20
+if {[info exists env(PIMCTL_TUI_TIMEOUT)]} {
+    set timeout $env(PIMCTL_TUI_TIMEOUT)
+}
+set env(TERM) "xterm-256color"
+set stty_init "rows 40 columns 120"
+proc fail {msg} {
+    puts "\n!!! FAIL: $msg"
+    exit 1
+}
+spawn -noecho $bin scope
+expect {
+    "enter choose" {}
+    eof { fail "scope picker exited before rendering" }
+    timeout { fail "scope picker did not render" }
+}
+send -- "Development"
+expect {
+    "1 of 2 shown" {}
+    eof { fail "scope picker exited during filtering" }
+    timeout { fail "scope picker did not filter" }
+}
+send -- "\r"
+expect {
+    "PROBE_SCOPE=1" {}
+    eof { fail "wrong scope selected" }
+    timeout { fail "enter did not choose the filtered scope" }
+}
+expect {
+    "PROBE_DONE" {}
+    eof { fail "missing completion marker" }
+    timeout { fail "scope picker did not finish" }
+}
+expect {
+    eof {}
+    timeout { fail "probe stayed alive" }
+}
+set result [wait]
+if {[lindex $result 3] != 0} { fail "probe exited unsuccessfully" }
+puts "PASS: init scope selection"

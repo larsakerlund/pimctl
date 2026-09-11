@@ -324,3 +324,40 @@ func TestPickerHeaderDescribesTheRealKeys(t *testing.T) {
 		t.Error("filtering no longer needs a leading '/'; the header must not say so")
 	}
 }
+
+func TestSingleChoiceUsesHighlightedFilteredItem(t *testing.T) {
+	m := pickerFixture()
+	m.single = true
+	typeText(m, "cost")
+	pressKey(m, "down")
+	pressKey(m, "ctrl+a")
+	pressKey(m, "tab")
+	if m.selectedCount() != 0 {
+		t.Fatal("single picker permits multiselection")
+	}
+	pressKey(m, "enter")
+	if !m.confirmed || m.selectedCount() != 1 || !m.items[2].selected {
+		t.Fatal("did not choose highlighted filtered item")
+	}
+	if m.View() != "" {
+		t.Fatal("did not erase frame")
+	}
+}
+
+func TestSingleChoiceNoMatchDoesNotFinish(t *testing.T) {
+	m := pickerFixture()
+	m.single = true
+	typeText(m, "no-such-scope")
+	pressKey(m, "enter")
+	if m.confirmed {
+		t.Fatal("accepted empty match")
+	}
+	pressKey(m, "esc")
+	if m.aborted || len(m.shown) != 4 {
+		t.Fatal("escape did not clear filter")
+	}
+	pressKey(m, "esc")
+	if !m.aborted {
+		t.Fatal("escape did not cancel")
+	}
+}

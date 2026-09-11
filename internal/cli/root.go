@@ -66,13 +66,16 @@ Management — the ones granted at a management group, subscription, resource
 group or resource.
 
   See what you can get      pimctl ls
-  Take it, one or many      pimctl up            (interactive, type to filter)
+  Set up project access    pimctl init          (creates .pimctl.yaml)
+  Take it, one or many      pimctl up            (project file or picker)
   Check what you hold       pimctl status
   Give it back              pimctl down
 
 Roles are activated in batch, not one at a time: pick several in the picker, or
 select them with --role/--scope/--key, and pimctl fires them together and
-reports each one. A set you use often can be saved as a preset and replayed with
+reports each one. In a project, init writes a shareable .pimctl.yaml; up uses it
+by default. Bare down and status keep their usual meaning; add --project for
+that file’s exact roles. A set you use often can be saved as a preset and replayed with
 "pimctl up <preset>". Several tenants at once is one flag: -c twice, or
 --all-contexts.
 
@@ -95,6 +98,7 @@ prints which tenant that resolved to. See "pimctl help auth".`,
 
 	presets, caches, version := newPresetCmd(opts), newCacheCmd(), newVersionCmd()
 	root.AddCommand(
+		newInitCmd(opts, d),
 		newUpCmd(opts, d),
 		newDownCmd(opts, d),
 		newListCmd(opts, d),

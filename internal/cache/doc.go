@@ -9,7 +9,8 @@
 // publishes each replacement without exposing a partially written file.
 //
 //   - eligibilities-<context>-<account>.json holds one account's role listing
-//     for [TTL], ten minutes.
+//     for [TTL], ten minutes. Scoped variants append a target digest and
+//     retain ARM ancestry/membership evidence under the same TTL and clearing.
 //   - policies-<context>-<account>.json holds policies keyed by [PolicyKey],
 //     each valid for [PolicyTTL], 24 hours. [DropPolicy] removes a rejected
 //     policy so the next activation reads its replacement from ARM.

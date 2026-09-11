@@ -26,12 +26,33 @@ type row struct {
 	// Elig is the eligibility itself, and the source of every name and id the
 	// row renders.
 	Elig armclient.Eligibility
+	// EligibilityScope retains the granting scope when Elig.Scope is a narrower
+	// activation target. Empty means the target and granting scope are equal.
+	EligibilityScope string
 	// Active is the live activation for this scope+role, or nil.
 	Active      *armclient.Assignment
 	ActiveState rowState // confidence in the activation state, including an absent activation.
 	// AlsoVia lists the member types of duplicate eligibilities folded into
 	// this row by DedupeRows, e.g. the group grant behind a direct one.
 	AlsoVia []string
+}
+
+// sourceScope returns the scope whose eligibility and policy authorize a row.
+func (r row) sourceScope() string {
+	if r.EligibilityScope != "" {
+		return r.EligibilityScope
+	}
+	return r.Elig.Properties.Scope
+}
+
+// activationRoleID qualifies the definition for the target without changing
+// the source eligibility or its linked schedule identifier.
+func (r row) activationRoleID() string {
+	return armclient.QualifyRoleDefinitionID(
+		r.Elig.Properties.Scope,
+		r.sourceScope(),
+		r.Elig.Properties.RoleDefinitionID,
+	)
 }
 
 // Key is the (context, scope, role GUID) identity used for matching rows to
@@ -213,9 +234,10 @@ func toPresetEntries(rows []row) []config.PresetEntry {
 	out := make([]config.PresetEntry, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, config.PresetEntry{
+			EligibilityScope: r.EligibilityScope,
 			Context:          contextName(r.Context),
 			Scope:            r.Elig.Properties.Scope,
-			RoleDefinitionID: r.Elig.Properties.RoleDefinitionID,
+			RoleDefinitionID: r.activationRoleID(),
 			RoleName:         r.Elig.RoleName(),
 			ScopeName:        r.Elig.ScopeName(),
 		})

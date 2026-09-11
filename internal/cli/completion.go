@@ -29,6 +29,12 @@ func registerCompletions(root *cobra.Command, opts *globalOpts) {
 		if c.Flags().Lookup("preset") != nil {
 			c.RegisterFlagCompletionFunc("preset", completePresets) //nolint:errcheck // see above
 		}
+		if c.Flags().Lookup("from-preset") != nil {
+			c.RegisterFlagCompletionFunc( //nolint:errcheck // registered once for an existing flag.
+				"from-preset",
+				completePresets,
+			)
+		}
 		if c.Flags().Lookup("key") != nil {
 			c.RegisterFlagCompletionFunc("key", completeKeysWith(opts)) //nolint:errcheck // see above
 		}

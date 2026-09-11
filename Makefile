@@ -37,6 +37,7 @@ tui-test:
 	go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
 	expect scripts/tui-filter-test.exp /tmp/pimctl-tuiprobe
 	expect scripts/tui-toggle-test.exp /tmp/pimctl-tuiprobe
+	expect scripts/tui-scope-test.exp /tmp/pimctl-tuiprobe
 	expect scripts/tui-justification-test.exp /tmp/pimctl-tuiprobe
 
 # The suite again, with every PATH entry that holds a cloudctx removed.

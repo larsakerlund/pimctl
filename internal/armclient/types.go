@@ -30,6 +30,8 @@ type ExpandedProperties struct {
 
 // EligibilityProperties is properties{} on a roleEligibilityScheduleInstance.
 type EligibilityProperties struct {
+	Condition        string `json:"condition,omitempty"`        // ARM access constraint; preserved on activation.
+	ConditionVersion string `json:"conditionVersion,omitempty"` // Syntax version of Condition.
 	// Scope is where the eligibility applies. It is also the scope an
 	// activation request must re-qualify RoleDefinitionID against.
 	Scope string `json:"scope"`
@@ -181,6 +183,8 @@ type TicketInfo struct {
 // Field order and omitempty rules match the 17 proven SelfActivate requests
 // recovered from this tenant's request history.
 type RequestProperties struct {
+	Condition        string `json:"condition,omitempty"`        // Eligibility's access constraint, copied verbatim.
+	ConditionVersion string `json:"conditionVersion,omitempty"` // Eligibility's condition syntax version.
 	// PrincipalID is the signed-in user's own object id, even when the
 	// eligibility is held by a group. Sending the group's id is rejected.
 	PrincipalID string `json:"principalId"`

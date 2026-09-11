@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -284,5 +285,23 @@ func TestApplyRequestErrorMapping(t *testing.T) {
 	res = applyRequestError(result{}, sess, ae, nil)
 	if res.Detail != "Conflict: Something specific went wrong." {
 		t.Errorf("verbatim passthrough failed: %q", res.Detail)
+	}
+}
+
+func TestPreservedActivationExpiryIsRecheckedAtExecution(t *testing.T) {
+	expired := time.Now().Add(-time.Second)
+	s := &session{Token: &azauth.Token{Context: "contoso", TenantID: "tid", PrincipalID: "oid"}}
+	item := &planItem{
+		KeepActive: true,
+		Session:    s,
+		Row: row{
+			Context: "contoso",
+			Active:  &armclient.Assignment{Properties: armclient.AssignmentProperties{EndDateTime: &expired}},
+		},
+	}
+	got := activateOne(context.Background(), item, "", "", "", false, time.Second)
+	if got.Outcome != OutcomeFailed || !strings.Contains(got.Detail, "expired") ||
+		!strings.Contains(got.Detail, "run pimctl up again") {
+		t.Fatalf("expired window reported as held: %#v", got)
 	}
 }

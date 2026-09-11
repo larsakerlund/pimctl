@@ -31,7 +31,7 @@ func baseResult(item *planItem) result {
 		ScopeName:        item.Row.Elig.ScopeName(),
 		ScopeType:        item.Row.Elig.ScopeType(),
 		Scope:            item.Row.Elig.Properties.Scope,
-		RoleDefinitionID: item.Row.Elig.Properties.RoleDefinitionID,
+		RoleDefinitionID: item.Row.activationRoleID(),
 		RequestName:      item.RequestName,
 	}
 }
@@ -43,10 +43,8 @@ func baseResult(item *planItem) result {
 //   - principalId is the signed-in user's own object id — the ARM token's oid
 //     claim, passed in as principalID — even when the eligibility is inherited
 //     through a group. Sending the group's id is rejected.
-//   - roleDefinitionId is re-qualified to the activation scope by
-//     [armclient.QualifyRoleDefinitionID]. Both scopes are the eligibility's own
-//     here, since pimctl activates at the scope the eligibility was granted at,
-//     so today that returns the id unchanged.
+//   - roleDefinitionId is re-qualified to the activation scope, retaining the
+//     original form when the eligibility and activation scopes are equal.
 //   - linkedRoleEligibilityScheduleId goes through exactly as the eligibility
 //     reported it. Rewriting it makes ARM reject the request.
 //
@@ -59,14 +57,11 @@ func buildActivateBody(
 	principalID, justification, ticketNumber, ticketSystem string,
 	now time.Time,
 ) armclient.RequestBody {
-	scope := item.Row.Elig.Properties.Scope
 	props := armclient.RequestProperties{
-		PrincipalID: principalID,
-		RoleDefinitionID: armclient.QualifyRoleDefinitionID(
-			scope,
-			scope,
-			item.Row.Elig.Properties.RoleDefinitionID,
-		),
+		Condition:                       item.Row.Elig.Properties.Condition,
+		ConditionVersion:                item.Row.Elig.Properties.ConditionVersion,
+		PrincipalID:                     principalID,
+		RoleDefinitionID:                item.Row.activationRoleID(),
 		RequestType:                     armclient.RequestTypeSelfActivate,
 		LinkedRoleEligibilityScheduleID: item.Row.Elig.Properties.RoleEligibilityScheduleID,
 		Justification:                   justification,
@@ -107,6 +102,9 @@ func activateOne(
 	pollTimeout time.Duration,
 ) result {
 	res := baseResult(item)
+	if item.KeepActive {
+		return preservedActivationResult(item, res)
+	}
 	if item.PrepErr != nil {
 		res.Outcome = OutcomeFailed
 		res.Detail = item.PrepErr.Error()
@@ -134,6 +132,10 @@ func activateOne(
 			res.Outcome = OutcomeAborted
 			res.Detail = "interrupted while submitting — check `pimctl status`"
 			return res
+		}
+		var policyErr *armclient.APIError
+		if errors.As(err, &policyErr) && policyErr.Kind == armclient.KindPolicyValidation {
+			cache.DropPolicy(item.Session.owner(), item.Row.sourceScope(), item.Row.Elig.Properties.RoleDefinitionID)
 		}
 		return applyRequestError(res, item.Session, err, item.Row.ActiveUntil())
 	}
@@ -400,4 +402,20 @@ func deactivateOne(ctx context.Context, row target, noWait bool, pollTimeout tim
 	// deactivation queued for approval is reported as such rather than as a
 	// poll timeout.
 	return classifyRequest(res, sr, noWait, OutcomeDeactivated, pollTimeout)
+}
+
+// preservedActivationResult checks the activation window again after prompts and
+// policy reads. An expired window fails rather than claiming access or silently
+// submitting a request that was never planned or justified.
+func preservedActivationResult(item *planItem, res result) result {
+	if item.Row.Active == nil || !activationWindowCurrent(item.Row.Active.Properties, time.Now()) {
+		res.Outcome = OutcomeFailed
+		res.Detail = "the existing activation window expired during this command; run pimctl up again"
+		return res
+	}
+	res.Outcome = OutcomeAlreadyActive
+	res.Since = item.Row.Active.Properties.StartDateTime
+	res.Until = item.Row.Active.Properties.EndDateTime
+	res.Detail = "existing activation window unchanged"
+	return res
 }

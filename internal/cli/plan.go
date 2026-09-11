@@ -23,8 +23,9 @@ import (
 // request GUID already fixed. The GUID is generated once per role per run so a
 // retry updates the same request instead of creating a duplicate.
 type planItem struct {
-	Row     row      // the eligible role this activates.
-	Session *session // the context's token and client, so the plan can be executed as it stands.
+	KeepActive bool     // Preserve a project activation verified in Azure without a new request.
+	Row        row      // the eligible role this activates.
+	Session    *session // the context's token and client, so the plan can be executed as it stands.
 	// Settings is the role's PIM policy, nil when it could not be read — in
 	// which case PrepErr says why and nothing is sent.
 	Settings *armclient.RoleSettings
@@ -99,7 +100,7 @@ func buildPlan(
 				item.PrepErr = fmt.Errorf("no session for context %q", item.Row.Context)
 				return
 			}
-			scope := item.Row.Elig.Properties.Scope
+			scope := item.Row.sourceScope()
 			roleDef := item.Row.Elig.Properties.RoleDefinitionID
 			owner := item.Session.owner()
 

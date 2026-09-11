@@ -48,7 +48,8 @@ type Item struct {
 // initial filtered set. A Model is owned by bubbletea's single update
 // goroutine; nothing here is safe for concurrent use.
 type Model struct {
-	items []Item // every row, in the order given; selection lives on the item.
+	single bool   // Enter chooses only the highlighted item, for scope navigation.
+	items  []Item // every row, in the order given; selection lives on the item.
 	// shown indexes items, in display order, after filtering. Filtering never
 	// touches items, so a row selected under one filter is still selected
 	// under the next.
@@ -205,6 +206,14 @@ func (m *Model) handleExitKey(key tea.KeyMsg) (cmd tea.Cmd, handled bool) {
 		m.aborted = true
 		return tea.Quit, true
 	case "enter":
+		if m.single {
+			if len(m.shown) == 0 {
+				return nil, true
+			}
+			for i := range m.items {
+				m.items[i].selected = i == m.shown[m.cursor]
+			}
+		}
 		m.confirmed = true
 		return tea.Quit, true
 	}
@@ -213,13 +222,16 @@ func (m *Model) handleExitKey(key tea.KeyMsg) (cmd tea.Cmd, handled bool) {
 
 // handleEditKey applies the selection, navigation and filter keys.
 func (m *Model) handleEditKey(key tea.KeyMsg) {
+	if m.single && (key.String() == "tab" || key.String() == "ctrl+a") {
+		return
+	}
 	switch key.String() {
 	case "tab":
 		m.toggleCursor()
 	case " ":
 		// Space toggles only while the filter is empty; once you are typing it
 		// is a character like any other.
-		if m.filter == "" {
+		if m.canToggleOnSpace() {
 			m.toggleCursor()
 			return
 		}
@@ -263,8 +275,12 @@ func (m *Model) View() string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "%s\n", pal.Wrap(term.Bold, m.title))
-	fmt.Fprintf(&b, "%d selected · %d of %d shown · type to filter, tab toggle, ctrl+a all, enter confirm\n",
-		m.selectedCount(), len(m.shown), len(m.items))
+	if m.single {
+		fmt.Fprintf(&b, "%d of %d shown · type to filter, arrows move, enter choose\n", len(m.shown), len(m.items))
+	} else {
+		fmt.Fprintf(&b, "%d selected · %d of %d shown · type to filter, tab toggle, ctrl+a all, enter confirm\n",
+			m.selectedCount(), len(m.shown), len(m.items))
+	}
 
 	filter := m.filter
 	if filter == "" {
@@ -292,7 +308,11 @@ func (m *Model) View() string {
 		if m.items[i].Active {
 			label = pal.Wrap(term.Dim, label)
 		}
-		fmt.Fprintf(&b, "%s[%s] %s\n", cursor, mark, label)
+		if m.single {
+			fmt.Fprintf(&b, "%s%s\n", cursor, label)
+		} else {
+			fmt.Fprintf(&b, "%s[%s] %s\n", cursor, mark, label)
+		}
 	}
 	if len(m.shown) > m.height {
 		fmt.Fprintf(&b, "  %s\n", pal.Wrap(term.Dim,
@@ -313,6 +333,26 @@ func (m *Model) View() string {
 // a nil slice and the caller decides what nothing means.
 func Run(title string, items []Item, height int) ([]int, error) {
 	m := NewModel(title, items, height)
+	return runModel(m)
+}
+
+// RunSingle draws the same inline picker but chooses the highlighted item on
+// Enter. It blocks until selection or cancellation and returns Run's errors.
+func RunSingle(title string, items []Item, height int) (int, error) {
+	m := NewModel(title, items, height)
+	m.single = true
+	selected, err := runModel(m)
+	if err != nil {
+		return 0, err
+	}
+	if len(selected) != 1 {
+		return 0, errors.New("no item selected")
+	}
+	return selected[0], nil
+}
+
+// runModel drives an inline picker and extracts its confirmed selection.
+func runModel(m *Model) ([]int, error) {
 	// Render to stderr so stdout stays a clean data channel, and inline rather
 	// than on the alternate screen so the picker sits under the prompt like fzf
 	// instead of taking over the terminal.
@@ -336,3 +376,7 @@ func Run(title string, items []Item, height int) ([]int, error) {
 	}
 	return out, nil
 }
+
+// canToggleOnSpace preserves the multi-picker shortcut without selecting rows
+// in the single-choice scope browser, where space is always filter text.
+func (m *Model) canToggleOnSpace() bool { return m.filter == "" && !m.single }

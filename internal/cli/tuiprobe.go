@@ -104,3 +104,17 @@ func ProbeJustification(prefill string) error {
 	fmt.Println("PROBE_DONE")
 	return nil
 }
+
+// ProbeScope drives init's actual single-choice widget with readable scope names.
+// It performs no Azure calls and reports the chosen index for the pty test.
+func ProbeScope() error {
+	i, err := chooseInitOption(
+		"Choose project scope",
+		[]string{"Production · /subscriptions/prod", "Development · /subscriptions/dev"},
+	)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("PROBE_SCOPE=%d\nPROBE_DONE\n", i)
+	return nil
+}

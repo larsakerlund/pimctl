@@ -11,6 +11,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -24,9 +25,13 @@ import (
 // each role's policy maximum as the duration, and prompt for a justification
 // only if a policy asks for one.
 type activateOpts struct {
-	all    bool     // --all: every eligible role, which on this tenant is over a hundred.
-	roles  []string // --role: exact name when one matches, otherwise substring.
-	scopes []string // --scope: scope id or display-name substring.
+	verified     map[string]entryVerdict // Project activations verified through their own schedule requests.
+	projectOpts  projectOpts             // Project requirements or an explicit discovery bypass.
+	requirements *config.Project         // Resolved local requirements; nil for ordinary selection.
+	at           string                  // Exact activation target; --scope remains a selection filter.
+	all          bool                    // --all: every eligible role, which on this tenant is over a hundred.
+	roles        []string                // --role: exact name when one matches, otherwise substring.
+	scopes       []string                // --scope: scope id or display-name substring.
 	// keys are selection keys from `pimctl list`, in full or as any
 	// unambiguous prefix of at least four characters.
 	keys       []string
@@ -60,7 +65,7 @@ type activateOpts struct {
 func newUpCmd(opts *globalOpts, d deps) *cobra.Command {
 	c := newActivateCmd(opts, d)
 	c.Use = "up [PRESET]"
-	c.Short = "Activate roles — interactively, or a saved preset"
+	c.Short = "Activate project roles, a saved preset, or an interactive selection"
 	c.Aliases = nil
 	c.Args = cobra.MaximumNArgs(1)
 	c.Example = `  # pick interactively in the current context (just type to filter)
@@ -84,7 +89,11 @@ func newActivateCmd(opts *globalOpts, d deps) *cobra.Command {
 		Short: "Activate eligible Azure resource roles, in batch",
 		Long: `Activate one or more of your eligible Azure resource roles.
 
-With no selection flags pimctl shows an interactive multi-select of every
+With no selection flags pimctl uses the nearest .pimctl.yaml when present.
+Run pimctl init to create one, or use --no-project to bypass it. Bare down and
+status keep their usual meaning; use --project to select this file explicitly.
+
+Without a project file pimctl shows an interactive multi-select of every
 eligible role: type to filter, tab to toggle, ctrl+a for everything matching,
 enter to confirm.
 --role, --scope, --key, --all and --preset select roles without a terminal.
@@ -110,6 +119,8 @@ is reported per role.`,
 		},
 	}
 	f := cmd.Flags()
+	addProjectFlags(cmd, &o.projectOpts, true)
+	f.StringVar(&o.at, "at", "", "activate selected eligible roles at this exact ARM scope")
 	f.BoolVar(&o.all, "all", false, "select every eligible role")
 	f.StringArrayVar(&o.roles, "role", nil, "select roles whose name contains this text (repeatable, case-insensitive)")
 	f.StringArrayVar(
@@ -154,7 +165,8 @@ func checkActivateFlags(o *activateOpts) error {
 	if err := checkSelectionFlags(o.all, o.preset, o.roles, o.scopes, o.keys); err != nil {
 		return err
 	}
-	hasSelection := o.all || o.preset != "" || len(o.roles) > 0 || len(o.scopes) > 0 || len(o.keys) > 0
+	hasSelection := o.requirements != nil || o.all || o.preset != "" || len(o.roles) > 0 || len(o.scopes) > 0 ||
+		len(o.keys) > 0
 	if !hasSelection && !term.StdinIsTTY() {
 		return errNoTTY("role selection")
 	}
@@ -184,15 +196,9 @@ func checkActivateFlags(o *activateOpts) error {
 // that is waiting on an approver, is carried out through [reportRun] as an exit
 // code instead.
 func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) error {
-	if err := validateFlags(opts); err != nil {
-		return err
-	}
-	requested, err := requestedDuration(cmd, o.forDuration, o.hours, o.duration)
+	requested, err := prepareActivation(cmd, opts, o)
 	if err != nil {
 		return err
-	}
-	if flagErr := checkActivateFlags(o); flagErr != nil {
-		return flagErr
 	}
 	presetEntries, err := presetSelection(
 		o.preset,
@@ -207,8 +213,10 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 		return err
 	}
 	defer rc.finish(cmd)
-	ctx := rc.Ctx
-	rows, listErrs, future := readEligibilities(ctx, cmd, rc)
+	if o.requirements != nil {
+		return runProjectActivation(cmd, rc, o, requested)
+	}
+	rows, listErrs, future := readActivationEligibility(cmd, rc, o, presetEntries)
 	failures := slices.Concat(rc.Failures, listErrs)
 	reportContextFailures(cmd.ErrOrStderr(), failures)
 
@@ -216,12 +224,47 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 	if err != nil {
 		return err
 	}
+	if o.at != "" {
+		if len(failures) > 0 {
+			return errors.Join(failures...)
+		}
+		selected, err = narrowRows(cmd, rc, selected, o.at)
+		if err != nil {
+			return err
+		}
+		rows = selected
+	}
+	if future == nil {
+		future = startActivationListing(rc.Ctx, rc, targetScopes(selected))
+	}
+	return finishActivation(cmd, rc, o, requested, rows, selected, interactive, future, failures)
+}
+
+// finishActivation plans and submits a resolved selection through the shared
+// policy, justification and reporting pipeline. Failures remain per role once
+// requests have been sent; project preflight errors abort before submission.
+func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, requested time.Duration,
+	rows, selected []row, interactive bool, future *activeFuture, failures []error,
+) error {
+	ctx, opts := rc.Ctx, rc.Opts
 	failures = append(failures, markAlreadyActive(selected, future)...)
 
 	// The plan comes first because it carries the policies, and the policies
 	// decide whether a justification is even wanted.
-	plan := buildPlan(ctx, selected, rc.Sessions, requested, o.ticketNumber, rc.Refresh)
-	justification, err := resolveJustification(o.justification, interactive, plan)
+	var plan []*planItem
+	spPlan := term.NewSpinner(cmd.ErrOrStderr(), "checking activation policies…")
+	if o.requirements != nil {
+		plan = buildProjectPlan(rc, selected, requested, o.ticketNumber, o.verified)
+	} else {
+		plan = buildPlan(ctx, selected, rc.Sessions, requested, o.ticketNumber, rc.Refresh)
+	}
+	spPlan.Stop()
+	if o.requirements != nil {
+		if err := projectPlanError(plan); err != nil {
+			return err
+		}
+	}
+	justification, err := resolveJustification(o.justification, interactive || o.requirements != nil, plan)
 	if err != nil {
 		return err
 	}
@@ -236,8 +279,8 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 		Yes:         o.yes,
 		Interactive: interactive,
 		All:         o.all,
-		Roles:       len(plan),
-		Prompt:      fmt.Sprintf("Activate %s?", roleCount(len(plan))),
+		Roles:       activationSubmissionCount(plan),
+		Prompt:      fmt.Sprintf("Activate %s?", roleCount(activationSubmissionCount(plan))),
 	}, func(w io.Writer) { printPlanTable(w, plan, multi, scopes) })
 	if err != nil {
 		return err
@@ -268,7 +311,7 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 
 	// Requests have already been sent to ARM, so nothing below may return early
 	// — the user must always see which roles activated and the right exit code.
-	rememberActivateRun(cmd, justification, o.savePreset, selected)
+	rememberActivateRun(cmd, activationJustification(plan, justification), o.savePreset, selected)
 	return reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
 }
 
@@ -311,6 +354,10 @@ func selectRows(
 	errw := cmd.ErrOrStderr()
 	switch {
 	case o.preset != "":
+		rows, err = resolveNarrowedPreset(cmd, rc, rows, presetEntries)
+		if err != nil {
+			return nil, false, err
+		}
 		sel, missing := applyPreset(rows, presetEntries)
 		for _, m := range missing {
 			fmt.Fprintf(errw, "skipping %s — no longer eligible\n", m)
@@ -394,7 +441,7 @@ func fillAlreadyActiveWindows(results []result, active []activeRow) []result {
 // and never an error.
 func rememberActivateRun(cmd *cobra.Command, justification, presetName string, selected []row) {
 	errw := cmd.ErrOrStderr()
-	if err := saveLastJustification(justification); err != nil {
+	if err := rememberJustification(justification); err != nil {
 		fmt.Fprintf(errw, "warning: could not save the justification for next time: %v\n", err)
 	}
 	if presetName == "" {
@@ -417,4 +464,43 @@ func savePreset(name string, rows []row) error {
 	}
 	ps.Set(name, toPresetEntries(rows))
 	return config.SavePresets(ps)
+}
+
+// prepareActivation validates local selection and duration before opening any
+// login. Automatic project discovery is resolved before terminal requirements.
+func prepareActivation(cmd *cobra.Command, opts *globalOpts, o *activateOpts) (time.Duration, error) {
+	if err := validateFlags(opts); err != nil {
+		return 0, err
+	}
+	if err := resolveActivationProject(cmd, o); err != nil {
+		return 0, err
+	}
+	requested, err := requestedDuration(cmd, o.forDuration, o.hours, o.duration)
+	if err != nil {
+		return 0, err
+	}
+	if flagErr := checkActivateFlags(o); flagErr != nil {
+		return 0, flagErr
+	}
+	return requested, nil
+}
+
+// activationJustification skips remembered-state updates when every project role
+// was already held and no activation request needed a justification.
+func activationJustification(plan []*planItem, justification string) string {
+	for _, item := range plan {
+		if !item.KeepActive {
+			return justification
+		}
+	}
+	return ""
+}
+
+// rememberJustification writes an actual run's reason; an empty reason means no
+// new activation was attempted and leaves the existing prompt prefill alone.
+func rememberJustification(justification string) error {
+	if justification == "" {
+		return nil
+	}
+	return saveLastJustification(justification)
 }

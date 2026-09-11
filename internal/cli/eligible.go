@@ -24,6 +24,14 @@ import (
 // Activations are never cached — `status` and the ACTIVE marker have to reflect
 // what is held right now.
 func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) ([]row, []error, *activeFuture) {
+	rows, errs, scopes := readEligibilityRows(ctx, cmd, rc)
+	return rows, errs, startActivationListing(ctx, rc, scopes)
+}
+
+// readEligibilityRows reads the cached or live eligibility selection and its
+// granting scopes without starting an activation fan-out. Narrowed selections
+// use this to avoid an unnecessary read at every original granting scope.
+func readEligibilityRows(ctx context.Context, cmd *cobra.Command, rc *runContext) ([]row, []error, []activationScope) {
 	sp := term.NewSpinner(cmd.ErrOrStderr(), "reading eligible roles…")
 	defer sp.Stop()
 
@@ -101,8 +109,7 @@ func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) 
 	// The fan-out needs the eligibility scopes, so it starts once they are
 	// known — which is the point at which the picker can already be shown.
 	sortScopes(scopes)
-	future := startActivationListing(ctx, rc, scopes)
-	return rows, errs, future
+	return rows, errs, scopes
 }
 
 // scopesFor retains the context for each distinct eligibility scope. A session

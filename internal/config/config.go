@@ -15,11 +15,12 @@ import (
 // later run. The role definition GUID plus the scope is the stable identity;
 // RoleName is kept only so a stale entry can be reported by name.
 type PresetEntry struct {
-	Context          string `json:"context"`             // cloudctx context; empty means the shared az login.
-	Scope            string `json:"scope"`               // Full ARM scope id the role was eligible at.
-	RoleDefinitionID string `json:"roleDefinitionId"`    // Full ARM id; only its GUID has to match.
-	RoleName         string `json:"roleName"`            // for naming an entry that is no longer eligible.
-	ScopeName        string `json:"scopeName,omitempty"` // Display name as it read when saved, for reporting only.
+	EligibilityScope string `json:"eligibilityScope,omitempty"` // Granting scope when activation is narrowed.
+	Context          string `json:"context"`                    // cloudctx context; empty means the shared az login.
+	Scope            string `json:"scope"`                      // Full ARM activation target.
+	RoleDefinitionID string `json:"roleDefinitionId"`           // Full ARM id; only its GUID has to match.
+	RoleName         string `json:"roleName"`                   // for naming an entry that is no longer eligible.
+	ScopeName        string `json:"scopeName,omitempty"`        // Display name as it read when saved, for reporting only.
 }
 
 // Presets is the on-disk presets file: preset name to the roles it selects. The

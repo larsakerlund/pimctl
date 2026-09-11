@@ -24,6 +24,7 @@ import (
 // a correction printed after it.
 func newStatusCmd(opts *globalOpts, d deps) *cobra.Command {
 	var fast, wait bool
+	var project projectOpts
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show the roles you currently have activated",
@@ -56,6 +57,10 @@ blocking read anywhere.`,
 			if fast && wait {
 				return errors.New("--fast and --wait ask for opposite things")
 			}
+			p, projectErr := project.load(cmd, false, false)
+			if projectErr != nil {
+				return projectErr
+			}
 			rc, err := prepare(cmd, opts, d, nil)
 			if err != nil {
 				return err
@@ -64,6 +69,9 @@ blocking read anywhere.`,
 			// read: the snappiness budget is for the interactive path.
 			rc.Wait = wait || (!fast && (!term.StdoutIsTTY() || opts.json()))
 			defer rc.finish(cmd)
+			if p != nil {
+				return runProjectStatus(cmd, rc, p, fast, wait)
+			}
 
 			_, listErrs := runStatus(cmd, rc, fast, wait)
 			if abortedEarly(cmd.Context()) {
@@ -77,6 +85,7 @@ blocking read anywhere.`,
 			return nil
 		},
 	}
+	addProjectFlags(cmd, &project, false)
 	cmd.Flags().BoolVar(&fast, "fast", false,
 		"print this machine's own record without waiting for Azure, even when not on a terminal")
 	cmd.Flags().BoolVar(&wait, "wait", false,

@@ -64,7 +64,7 @@ func printPlanTable(out io.Writer, plan []*planItem, multiContext bool, scopes s
 		}
 		notes[i] = strings.Join(rowNotes, "; ")
 		dur := "-"
-		if item.PrepErr == nil {
+		if item.PrepErr == nil && !item.KeepActive {
 			dur = armclient.FormatISODuration(item.Duration)
 		}
 		fields := []string{

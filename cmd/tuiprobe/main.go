@@ -29,6 +29,8 @@ func main() {
 	}
 	var err error
 	switch mode {
+	case "scope":
+		err = cli.ProbeScope()
 	case "select":
 		err = cli.ProbeSelect()
 	case "justification":
@@ -40,7 +42,7 @@ func main() {
 		}
 		err = cli.ProbeJustification(prefill)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: tuiprobe select | tuiprobe justification <prefill>")
+		fmt.Fprintln(os.Stderr, "usage: tuiprobe scope | tuiprobe select | tuiprobe justification <prefill>")
 		os.Exit(2)
 	}
 	if err != nil {

@@ -335,3 +335,46 @@ on `--all`.
 
 **A preset stopped working.** Roles you are no longer eligible for are listed on
 stderr as skipped. Re-save the preset with `--save-preset` after re-selecting.
+
+## Project requirements and reduced activation scopes
+
+`.pimctl.yaml` carries desired role/target pairs and a tenant, not a snapshot of
+one user's eligibility. Generating it through `init` keeps exact identifiers out
+of the setup conversation while retaining stable IDs in version control. Each
+teammate resolves their own eligible schedules. Personal context names and
+source schedule IDs would make a shared file depend on its author's machine or
+group membership, so those stay out of the format.
+
+The project setup and single `up` gesture follow the project-file convention of
+[azd](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/azd-schema)
+and [mise](https://mise.jdx.dev/configuration.html). These are interface
+references; pimctl does not implement a task runner or integration with either.
+Developer-persona reviews were simulated design feedback, not a study with real
+users. Their central objection was directory-sensitive `down`: a branch removing
+the file could expand a destructive selection. Bare `down` and `status` therefore
+keep their established behaviour; project selection is explicit on those commands.
+
+Microsoft documents reduced-scope activation in the
+[PIM activation workflow](https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-resource-roles-activate-your-roles#activate-a-role).
+The [scoped eligibility API](https://learn.microsoft.com/en-us/rest/api/authorization/role-eligibility-schedule-instances/list-for-scope?view=rest-authorization-2020-10-01)
+provides `atScope()` for ancestry and `assignedTo('userId')` for membership.
+pimctl intersects their complete paginated results by source schedule and role,
+then caches that evidence under the account and exact target for ten minutes.
+A failed read never becomes an empty successful lookup. Management-group
+ancestry cannot be established by prefix-matching a subscription ID.
+
+A narrowed row retains its granting scope for policy reads and its original
+linked eligibility schedule ID. The request, activation record, output identity
+and saved preset use the target scope. The role definition ID is qualified to
+that target; source conditions are retained. Competing sources with different
+granting scopes or conditions remain ambiguous, rather than choosing whichever
+policy is easier to satisfy.
+
+Project activation prints its file and account before network resolution. It
+checks every requirement and policy before sending any activation request, then
+uses the normal per-role results and exit codes. Existing activations are checked
+through the bounded per-scope fan-out and the same request verification and
+deactivation tombstones that ordinary status uses. This preserves current
+windows without trusting an unconfirmed local record or resurrecting a stale
+listing after `down`. Runtime failures are still per role; project activation
+is not an Azure transaction.

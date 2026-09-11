@@ -1,5 +1,6 @@
 // Package config stores pimctl's presets and its small amount of remembered
-// state under $XDG_CONFIG_HOME/pimctl, falling back to ~/.config/pimctl.
+// state under $XDG_CONFIG_HOME/pimctl, falling back to ~/.config/pimctl. It also
+// discovers and validates repository-local [Project] requirements.
 //
 // Two files, each read with [LoadPresets] or [LoadState] and replaced whole and
 // atomically by [SavePresets] or [SaveState]:
@@ -8,8 +9,7 @@
 //     the roles just activated; `--preset <name>` selects them again on a later
 //     run.
 //   - state.json — one field, the justification last sent, so the prompt can
-//     offer it again and an unattended run has something better than the
-//     default to say.
+//     offer it again. Unattended runs must supply their own justification.
 //
 // A [PresetEntry] is a saved *selection*, not a grant. It holds the cloudctx
 // context, the ARM scope and the role definition id — the identity that finds
@@ -24,7 +24,12 @@
 // a 0700 directory all the same, because between them they name every scope and
 // role this account can reach.
 //
-// A missing file is not an error: it reads as an empty preset set or zero
+// Project files use strict YAML and carry a tenant plus exact role/scope
+// identities. [FindProject] stops at repository boundaries; [LoadProject]
+// treats a missing explicitly selected file as an error. [CreateProject]
+// publishes a complete new file exclusively, with no Azure calls.
+//
+// A missing personal configuration file is not an error: it reads as an empty preset set or zero
 // state. Only an unreadable or unparseable file is reported, since silently
 // treating a corrupt presets.json as "no presets" would look like the presets
 // had been lost.

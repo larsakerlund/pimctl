@@ -22,13 +22,14 @@ import (
 // The zero value names nothing, which means the interactive multi-select;
 // checkDeactivateFlags rejects that when there is no terminal to show it on.
 type deactivateOpts struct {
-	all    bool     // --all: everything currently activated.
-	roles  []string // --role: exact name when one matches, otherwise substring.
-	scopes []string // --scope: scope id or display-name substring.
-	keys   []string // --key: selection keys, in full or as an unambiguous prefix.
-	preset string   // --preset: give up exactly what a saved selection covers.
-	noWait bool     // --no-wait: send without polling for the final status.
-	yes    bool     // -y: skip the confirmation.
+	projectOpts projectOpts // Explicit project targets; bare down never discovers a file.
+	all         bool        // --all: everything currently activated.
+	roles       []string    // --role: exact name when one matches, otherwise substring.
+	scopes      []string    // --scope: scope id or display-name substring.
+	keys        []string    // --key: selection keys, in full or as an unambiguous prefix.
+	preset      string      // --preset: give up exactly what a saved selection covers.
+	noWait      bool        // --no-wait: send without polling for the final status.
+	yes         bool        // -y: skip the confirmation.
 	// impliedAll makes a bare invocation mean "everything currently active",
 	// which is what `pimctl down` promises.
 	impliedAll bool
@@ -100,6 +101,7 @@ them without a terminal.`,
 // addDeactivateFlags registers the selection flags on cmd and binds them to o,
 // so the two spellings of the command cannot drift apart.
 func addDeactivateFlags(cmd *cobra.Command, o *deactivateOpts) {
+	addProjectFlags(cmd, &o.projectOpts, false)
 	f := cmd.Flags()
 	f.BoolVar(&o.all, "all", false, "deactivate every activated role")
 	f.StringArrayVar(&o.roles, "role", nil, "select roles whose name contains this text (repeatable, case-insensitive)")
@@ -126,7 +128,7 @@ func checkDeactivateFlags(o *deactivateOpts) error {
 	if err := checkSelectionFlags(o.all, o.preset, o.roles, o.scopes, o.keys); err != nil {
 		return err
 	}
-	hasSelection := o.all || o.impliedAll || o.preset != "" ||
+	hasSelection := o.projectOpts.selected() || o.all || o.impliedAll || o.preset != "" ||
 		len(o.roles) > 0 || len(o.scopes) > 0 || len(o.keys) > 0
 	if !hasSelection && !term.StdinIsTTY() {
 		return errNoTTY("role selection")
@@ -147,16 +149,7 @@ func checkDeactivateFlags(o *deactivateOpts) error {
 // activation record as it does, so an interrupt partway through still leaves
 // behind what actually happened.
 func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOpts) error {
-	if err := validateFlags(opts); err != nil {
-		return err
-	}
-	if err := checkDeactivateFlags(o); err != nil {
-		return err
-	}
-	presetEntries, err := presetSelection(
-		o.preset,
-		o.all || len(o.roles) > 0 || len(o.scopes) > 0 || len(o.keys) > 0,
-	)
+	project, presetEntries, err := prepareDeactivation(cmd, opts, o)
 	if err != nil {
 		return err
 	}
@@ -166,12 +159,16 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 		return err
 	}
 	defer rc.finish(cmd)
-	ctx := rc.Ctx
-	active, failures, err := readActivations(ctx, cmd, rc)
+	presetEntries, selectedScopes, err := projectDeactivation(cmd, rc, project, presetEntries)
 	if err != nil {
 		return err
 	}
-	if done, doneErr := nothingToDeactivate(cmd, active, o, failures); done {
+	ctx := rc.Ctx
+	active, failures, err := readActivations(ctx, cmd, rc, selectedScopes)
+	if err != nil {
+		return err
+	}
+	if done, doneErr := noDeactivationTargets(cmd, active, o, failures, project); done {
 		return doneErr
 	}
 	targets, selErr := selectTargets(ctx, cmd, rc, active, o, presetEntries)
@@ -184,6 +181,20 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 	if sessErr := attachSessions(targets, rc.Sessions); sessErr != nil {
 		return sessErr
 	}
+	return finishDeactivation(cmd, rc, o, targets, active, failures)
+}
+
+// finishDeactivation confirms and executes resolved targets, preserving ordinary
+// deactivation result reporting and per-role activation-record updates.
+func finishDeactivation(
+	cmd *cobra.Command,
+	rc *runContext,
+	o *deactivateOpts,
+	targets []target,
+	active []activeRow,
+	failures []error,
+) error {
+	ctx, opts := rc.Ctx, rc.Opts
 	multi := len(rc.Sessions) > 1
 	scopes := deactivateScopeLabeler(targets, active)
 
@@ -216,10 +227,11 @@ func readActivations(
 	ctx context.Context,
 	cmd *cobra.Command,
 	rc *runContext,
+	scopes []activationScope,
 ) (active []activeRow, failures []error, err error) {
 	local := readLocalRecord(rc)
 	sp := term.NewSpinner(cmd.ErrOrStderr(), "reading active roles…")
-	active, listErrs, slowScopes := listActivations(ctx, rc, nil)
+	active, listErrs, slowScopes := listActivations(ctx, rc, scopes)
 	local.verdicts = verifyConfirming(ctx, rc, active, slowScopes)
 	active = deactivationCandidates(local, active)
 	sp.Stop()
@@ -302,7 +314,7 @@ func selectTargets(
 	}
 
 	switch {
-	case o.preset != "":
+	case o.preset != "" || o.projectOpts.selected():
 		// A preset carries scope and role id, so it needs no listing at all.
 		selected := make([]target, 0, len(presetEntries))
 		for _, e := range presetEntries {
@@ -373,4 +385,71 @@ func deactivateScopeLabeler(targets []target, active []activeRow) scopeLabeler {
 		refs = append(refs, scopeRef{Name: a.Assignment.ScopeName(), ID: a.Assignment.Properties.Scope})
 	}
 	return newScopeLabeler(refs)
+}
+
+// noDeactivationTargets preserves ordinary empty-selection output while allowing
+// explicit project targets to reach ARM even when its listing dropped a row.
+func noDeactivationTargets(
+	cmd *cobra.Command,
+	active []activeRow,
+	o *deactivateOpts,
+	failures []error,
+	project *config.Project,
+) (bool, error) {
+	if project != nil {
+		return false, nil
+	}
+	return nothingToDeactivate(cmd, active, o, failures)
+}
+
+// projectDeactivation adapts exact project targets after checking the tenant.
+func projectDeactivation(
+	cmd *cobra.Command,
+	rc *runContext,
+	project *config.Project,
+	entries []config.PresetEntry,
+) ([]config.PresetEntry, []activationScope, error) {
+	if project == nil {
+		return entries, nil, nil
+	}
+	s, err := projectSession(cmd, rc, project.Tenant)
+	if err != nil {
+		return nil, nil, err
+	}
+	fmt.Fprintln(
+		cmd.ErrOrStderr(),
+		"Deactivating the exact roles in this file. Any other project using those same activations is affected.",
+	)
+	return projectEntries(project, s), projectScopes(project, s), nil
+}
+
+// prepareDeactivation validates selectors and reads local configuration before
+// authentication. A missing explicitly requested project never falls back.
+func prepareDeactivation(
+	cmd *cobra.Command,
+	opts *globalOpts,
+	o *deactivateOpts,
+) (*config.Project, []config.PresetEntry, error) {
+	if err := validateFlags(opts); err != nil {
+		return nil, nil, err
+	}
+	project, err := o.projectOpts.load(cmd, false, hasExplicitSelection(o) || o.all)
+	if err != nil {
+		return nil, nil, err
+	}
+	if project != nil {
+		o.impliedAll = false
+	}
+	if flagErr := checkDeactivateFlags(o); flagErr != nil {
+		return nil, nil, flagErr
+	}
+	presetEntries, err := presetSelection(
+		o.preset,
+		o.all || len(o.roles) > 0 || len(o.scopes) > 0 || len(o.keys) > 0,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return project, presetEntries, nil
 }

@@ -156,6 +156,9 @@ func TestOneContextListFailureKeepsTheOthersRows(t *testing.T) {
 	// Through the production path: a helper that only tests call proves only
 	// that the helper works.
 	rc := &runContext{Sessions: sessions, Ctx: context.Background(), Timings: newTimings(false)}
+	// The gatherer starts a background listing; join it before the next test
+	// replaces the process runner used by activation-record lookups.
+	defer rc.bg.Wait()
 	rows, errs, _ := readEligibilities(context.Background(), newRootCmdWithDiscard(t), rc)
 	if len(rows) != 2 {
 		t.Fatalf("got %d rows from the healthy context, want 2 — a failing context discarded them", len(rows))
