@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -222,6 +223,16 @@ func readActivations(
 		return nil, nil, ctx.Err()
 	}
 	failures = slices.Concat(rc.Failures, listErrs)
+	if len(slowScopes) > 0 {
+		failures = append(
+			failures,
+			fmt.Errorf(
+				"activation state is unknown at %d scope(s): %s",
+				len(slowScopes),
+				strings.Join(labelScopes(rc, slowScopes), ", "),
+			),
+		)
+	}
 	reportUnconfirmedScopes(cmd, rc, slowScopes)
 	reportContextFailures(cmd.ErrOrStderr(), failures)
 	return active, failures, nil
@@ -240,10 +251,11 @@ func nothingToDeactivate(
 	if len(active) > 0 || hasExplicitSelection(o) {
 		return false, nil
 	}
-	reportNothingActive(cmd)
 	if len(failures) > 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Could not determine all active roles; deactivation is incomplete.")
 		return true, partialFailureError(failures)
 	}
+	reportNothingActive(cmd)
 	return true, nil
 }
 

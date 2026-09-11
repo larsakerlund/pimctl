@@ -7,12 +7,67 @@
 package cli
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
+	"github.com/larsakerlund/pimctl/internal/azauth"
 )
+
+func TestDownFailsWhenScopeDiscoveryIsIncomplete(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(strconv.FormatBool(partial), func(t *testing.T) {
+			f := &fakeARM{t: t, eligibilities: twoLowImpactRoles(), putStatus: "Revoked"}
+			f.install()
+			shortDeadlines(t, 10*time.Millisecond)
+			base := f.srv
+			slowScope := f.eligibilities[1].Properties.Scope
+			active := mkActivated(
+				"Cost Management Contributor",
+				f.eligibilities[0].RoleDefinitionGUID(),
+				f.eligibilities[0].Properties.Scope,
+				"Production",
+				time.Now().Add(time.Hour),
+			)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/roleAssignmentScheduleInstances") {
+					if !partial || strings.HasPrefix(r.URL.Path, slowScope+"/") {
+						<-r.Context().Done()
+						return
+					}
+					writeJSON(t, w, map[string]any{"value": []armclient.Assignment{active}})
+					return
+				}
+				base.Config.Handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
+				tok := &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1", AccessToken: "fake"}
+				return []*session{
+					{Context: "contoso", Token: tok, Client: armclient.New(srv.URL, tok.AccessToken, srv.Client())},
+				}, nil, nil
+			})
+			out, stderr, err := runCmd(t, "down", "-c", "contoso", "-y")
+			if err == nil || ExitCode(err) != ExitFailed {
+				t.Fatalf("incomplete deactivation succeeded: out=%q stderr=%q", out, stderr)
+			}
+			if strings.Contains(out, "no roles are currently activated") {
+				t.Fatalf("unread scopes reported empty: %s", out)
+			}
+			want := 0
+			if partial {
+				want = 1
+			}
+			if got := len(f.putBodies()); got != want {
+				t.Fatalf("submitted %d roles, want %d", got, want)
+			}
+		})
+	}
+}
 
 func TestStatusAndDeactivate(t *testing.T) {
 	end := time.Now().Add(58 * time.Minute)

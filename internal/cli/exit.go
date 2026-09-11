@@ -59,7 +59,7 @@ func ExitCode(err error) int {
 func partialFailureError(failures []error) error {
 	return &exitCodeError{
 		code: ExitFailed,
-		msg:  fmt.Sprintf("%d context(s) could not be queried; the output above is incomplete", len(failures)),
+		msg:  fmt.Sprintf("%d query failure(s); the output above is incomplete", len(failures)),
 	}
 }
 
