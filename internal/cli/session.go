@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/azauth"
@@ -18,13 +20,16 @@ import (
 // session is one context's token plus the ARM client bound to it.
 //
 // Everything a command does against a tenant goes through a session, so a token
-// for one tenant can never reach another's client. It is mutable: [retryOn401]
-// replaces Token and re-points Client at the new one. The zero value is not
-// usable — sessions only come from [openSessions].
+// for one tenant can never reach another's client. Token is an immutable
+// identity snapshot; retryOn401 updates only the client's bearer credential
+// after checking that its tenant and principal still match. The zero value is
+// not usable — sessions only come from openSessionsWith.
 type session struct {
-	Context string            // the cloudctx context name; empty for the shared az login.
-	Token   *azauth.Token     // the ARM token and the claims read out of it.
-	Client  *armclient.Client // bound to that token, and so to one tenant.
+	Context     string            // the cloudctx context name; empty for the shared az login.
+	Token       *azauth.Token     // immutable initial token and identity claims.
+	Client      *armclient.Client // bound to that identity, with a refreshable bearer token.
+	refreshOnce sync.Once         // coordinates one refresh across all concurrent requests.
+	refreshErr  error             // written by refreshOnce and read only after it completes.
 }
 
 // labelOf names a context for messages; the ambient az login has no name.
@@ -136,33 +141,39 @@ func sessionFor(sessions []*session, label string) *session {
 	return nil
 }
 
-// retryOn401 re-runs fn once with a freshly minted token when ARM rejects the
-// cached one.
-//
-// A cached token can be revoked, or invalidated by a Conditional Access policy
-// change, before it expires. Without this the user would have to work out for
-// themselves that a stale file was the problem; with it the first 401 is
-// invisible and self-healing. Only one retry: a second 401 is a real
-// authorization failure and must be reported.
-func retryOn401(s *session, refreshed *bool, fn func() error) error {
+// retryOn401 retries one rejected call after a session-wide token refresh.
+// Concurrent calls share the same refresh. The session identity never changes:
+// a new account requires a new command and selection, rather than continuing
+// a plan assembled for another principal.
+func retryOn401(s *session, fn func() error) error {
 	err := fn()
 	var apiErr *armclient.APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized || s.Token == nil ||
+		!s.Token.FromCache {
 		return err
 	}
-	if s.Token == nil || !s.Token.FromCache || (refreshed != nil && *refreshed) {
-		return err
-	}
-	azauth.DropTokenCache(s.Token.Context, azauth.DefaultRunner)
-	fresh, acquireErr := azauth.AcquireCached(s.Token.Context, azauth.DefaultRunner, true)
-	if acquireErr != nil {
-		// Report the original 401: it is the more informative of the two.
-		return err
-	}
-	s.Token = fresh
-	s.Client.SetToken(fresh.AccessToken)
-	if refreshed != nil {
-		*refreshed = true
+	s.refreshOnce.Do(func() { s.refreshErr = refreshSession(s) })
+	if s.refreshErr != nil {
+		return errors.Join(err, s.refreshErr)
 	}
 	return fn()
+}
+
+// refreshSession replaces a rejected credential after checking its identity.
+// It is called once per session, drops the rejected cache entry, and stores
+// only a replacement for the same tenant and principal. Failures are returned
+// without changing the client's credential or the session's identity.
+func refreshSession(s *session) error {
+	azauth.DropTokenCache(s.Token.Context, azauth.DefaultRunner)
+	fresh, err := azauth.Acquire(s.Token.Context, azauth.DefaultRunner)
+	if err != nil {
+		return err
+	}
+	if s.Token.TenantID == "" || s.Token.PrincipalID == "" || !strings.EqualFold(s.Token.TenantID, fresh.TenantID) ||
+		!strings.EqualFold(s.Token.PrincipalID, fresh.PrincipalID) {
+		return errors.New("the signed-in account changed; rerun pimctl to select roles for the new account")
+	}
+	s.Client.SetToken(fresh.AccessToken)
+	azauth.WriteTokenCache(fresh, azauth.DefaultRunner)
+	return nil
 }

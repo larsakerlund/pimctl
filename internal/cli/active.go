@@ -281,9 +281,9 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 	defer cancelCall()
 
 	callStart := time.Now()
-	retried := false
+
 	var assignments []armclient.Assignment
-	err := retryOn401(s, &retried, func() error {
+	err := retryOn401(s, func() error {
 		var e error
 		assignments, e = s.Client.ListAssignmentsAtScope(callCtx, scope)
 		return e
@@ -445,9 +445,9 @@ func eligibleScopes(ctx context.Context, rc *runContext) (scopes []string, errs 
 		// drops rows: `cache clear` followed by a piped `status` took two
 		// minutes and exited 1 because this returned nothing here.
 		var elig []armclient.Eligibility
-		retried := false
+
 		err := rc.Timings.Track("ARM roleEligibilityScheduleInstances ("+label+")", func() error {
-			return retryOn401(s, &retried, func() error {
+			return retryOn401(s, func() error {
 				var e error
 				elig, e = s.Client.ListEligibilities(ctx)
 				return e

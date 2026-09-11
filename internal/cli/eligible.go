@@ -53,9 +53,9 @@ func readEligibilities(ctx context.Context, cmd *cobra.Command, rc *runContext) 
 				}
 			}
 			if !fromCache {
-				retried := false
+
 				err := rc.Timings.Track("ARM roleEligibilityScheduleInstances ("+label+")", func() error {
-					return retryOn401(s, &retried, func() error {
+					return retryOn401(s, func() error {
 						var e error
 						elig, e = s.Client.ListEligibilities(ctx)
 						return e

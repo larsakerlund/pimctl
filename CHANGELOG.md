@@ -21,6 +21,8 @@ The exit-code contract will not change without a major version.
   describes an unread scope as having no active roles.
 - A deactivation record no longer hides an activation whose Azure-reported
   window starts after that deactivation.
+- Concurrent 401 responses share one token refresh. Refresh refuses a changed
+  tenant or principal instead of continuing an existing plan under a new account.
 
 - **`install.sh` no longer uses the GitHub API when it has no token.** The tag
   comes from where `/releases/latest` redirects, and the files from the

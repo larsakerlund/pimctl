@@ -13,12 +13,86 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/azauth"
 )
+
+func TestConcurrentUnauthorizedSharesOneRefresh(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	installNoCloudctx(t)
+	original := azauth.DefaultRunner
+	var mints atomic.Int32
+	azauth.DefaultRunner = func(name string, args ...string) ([]byte, []byte, error) {
+		mints.Add(1)
+		return original(name, args...)
+	}
+	const callers = 8
+	var rejected atomic.Int32
+	gate := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer old" {
+			if rejected.Add(1) == callers {
+				close(gate)
+			}
+			<-gate
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":{"code":"ExpiredAuthenticationToken"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"value":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	tok := &azauth.Token{AccessToken: "old", TenantID: "tid-1", PrincipalID: "oid-1", FromCache: true}
+	sess := &session{Token: tok, Client: armclient.New(srv.URL, tok.AccessToken, srv.Client())}
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Go(func() {
+			err := retryOn401(
+				sess,
+				func() error { _, err := sess.Client.ListAssignments(context.Background()); return err },
+			)
+			if err != nil {
+				t.Errorf("concurrent recovery failed: %v", err)
+			}
+		})
+	}
+	wg.Wait()
+	if mints.Load() != 1 {
+		t.Fatalf("minted %d replacements, want one", mints.Load())
+	}
+	if sess.Token != tok {
+		t.Fatal("refresh replaced the immutable identity snapshot")
+	}
+}
+
+func TestRefreshRefusesAccountChange(t *testing.T) {
+	for _, tc := range []struct{ name, tenant, principal string }{
+		{"different user", "tid-1", "old-user"},
+		{"different tenant", "old-tenant", "oid-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			installNoCloudctx(t)
+			tok := &azauth.Token{AccessToken: "old", TenantID: tc.tenant, PrincipalID: tc.principal, FromCache: true}
+			sess := &session{Token: tok, Client: armclient.New("", "old", nil)}
+			calls := 0
+			err := retryOn401(
+				sess,
+				func() error { calls++; return &armclient.APIError{StatusCode: http.StatusUnauthorized} },
+			)
+			if err == nil || !strings.Contains(err.Error(), "account changed") {
+				t.Fatalf("changed identity accepted: %v", err)
+			}
+			if calls != 1 || sess.Token != tok {
+				t.Fatalf("continued under a changed identity: %d calls", calls)
+			}
+		})
+	}
+}
 
 // TestOneDeadContextDoesNotAbortTheOthers pins HIGH-3: with --all-contexts, a
 // context whose login has expired must not stop the healthy ones from being
@@ -71,7 +145,7 @@ func TestOneContextListFailureKeepsTheOthersRows(t *testing.T) {
 	t.Cleanup(bad.Close)
 
 	mk := func(name, url string, c *http.Client) *session {
-		tok := &azauth.Token{Context: name, AccessToken: "fake", PrincipalID: "oid", TenantID: "tid"}
+		tok := &azauth.Token{Context: name, AccessToken: "fake", PrincipalID: "oid-1", TenantID: "tid-1"}
 		return &session{Context: name, Token: tok, Client: armclient.New(url, tok.AccessToken, c)}
 	}
 	sessions := []*session{
