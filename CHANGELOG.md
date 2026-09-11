@@ -11,7 +11,8 @@ The exit-code contract will not change without a major version.
 
 ### Changed
 
-- Shortened the README and corrected the usage guide.
+- Shortened the README, corrected usage and storage documentation, and removed
+  duplicate temporary-file cleanup helpers.
 
 ### Fixed
 

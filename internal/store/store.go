@@ -44,12 +44,7 @@ func SanitizeContext(context string) string {
 	return unsafeInName.ReplaceAllString(context, "_")
 }
 
-// AzLoginName is the filename stand-in for the shared az login, which has no
-// context name of its own. It is exported because four files are named after a
-// context — the token, the listing, the policies and the activation record —
-// and they were not all using the same word: the listing said `_bare_az` where
-// the other three said `_az_login`. Nothing broke, because the prefixes differ,
-// but the fifth file would have been a coin toss.
+// AzLoginName is the filename stand-in for the shared Azure CLI login.
 const AzLoginName = "_az_login"
 
 // FileName renders a context as the name component of a per-context file:
@@ -151,15 +146,15 @@ func WriteAtomic(path string, blob []byte) {
 	}
 	tmp := f.Name()
 	if _, err = f.Write(blob); err != nil {
-		closeAndDiscard(f, tmp)
+		closeAndRemove(f, tmp)
 		return
 	}
 	if err = f.Close(); err != nil {
-		discard(tmp)
+		RemoveQuietly(tmp)
 		return
 	}
 	if err = os.Rename(tmp, path); err != nil {
-		discard(tmp)
+		RemoveQuietly(tmp)
 	}
 }
 
@@ -224,22 +219,5 @@ func closeAndRemove(f *os.File, path string) {
 func RemoveQuietly(path string) {
 	if err := os.Remove(path); err != nil {
 		_ = err // See the doc comment.
-	}
-}
-
-// closeAndDiscard abandons a temporary file that has already failed a write:
-// the close error carries nothing the caller can act on, and the file is going
-// away either way.
-func closeAndDiscard(f *os.File, path string) {
-	if err := f.Close(); err != nil {
-		_ = err // The file is being abandoned either way.
-	}
-	discard(path)
-}
-
-// discard removes an abandoned temporary file, ignoring a failure to do so.
-func discard(path string) {
-	if err := os.Remove(path); err != nil {
-		_ = err // A stray temp file is harmless; names are unique.
 	}
 }
