@@ -1,7 +1,6 @@
-// Reading the Azure CLI's own profile to learn which tenant the shared
-// `az login` currently points at. This is the cloudctx-free half of the tenant
-// check: a file read, no process spawn, and never an error — a profile that
-// cannot be read means the check does not apply, not that the command fails.
+// Read the selected Azure CLI account from its profile before reusing a token.
+// Missing or unfamiliar profiles disable cache reuse; authentication remains
+// the Azure CLI's responsibility.
 
 package azauth
 
@@ -10,66 +9,75 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // utf8BOM is the byte-order mark az prefixes its profile with.
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
-// azProfileName is the file az keeps its subscription list in, inside the Azure
-// CLI's config directory.
+// azProfileName is the subscription profile inside the Azure CLI config directory.
 const azProfileName = "azureProfile.json"
 
-// azProfile is the part of az's profile pimctl reads: which subscriptions the
-// current login can see, and which of them is the default.
-type azProfile struct {
-	// Subscriptions is empty for a login that has not been given any, which is
-	// a legitimate state and simply means there is no tenant to compare.
-	Subscriptions []struct {
-		TenantID  string `json:"tenantId"`  // the tenant this subscription belongs to.
-		IsDefault bool   `json:"isDefault"` // exactly one is true for a login with subscriptions.
-	} `json:"subscriptions"`
+// azAccount identifies the selected user and tenant without reading credentials.
+type azAccount struct {
+	Tenant string // tenant id of the default subscription.
+	User   string // Azure CLI login name, compared with the token's user claim.
 }
 
-// defaultAzTenant returns the tenant id of the shared `az login`'s default
-// subscription, and whether it could be determined at all.
-//
-// It is what makes the shared-login path's cached token as safe as a context's:
-// a user who runs `az login` for another tenant changes which tenant "no
-// context" means, and a token cached under the shared-login slot would
-// otherwise be served for the wrong one. [ReadTokenCache] refuses an entry
-// whose tenant no longer matches.
-//
-// The read is deliberately best-effort. az's profile is az's format, not a
-// contract with pimctl: a missing, unreadable or unrecognisable file yields
-// false, the check is skipped, and the worst case is the behaviour pimctl had
-// before this existed. It never returns an error, because there is no failure
-// here a user could act on.
-//
-// ~/.azure is read directly rather than through $AZURE_CONFIG_DIR: a bare az is
-// spawned with that variable removed (see [childEnv]), so the store it reads is
-// the one under the home directory whatever the surrounding shell says.
-func defaultAzTenant() (tenantID string, ok bool) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", false
-	}
-	//nolint:gosec // G304: the path is the home directory plus two constants.
-	raw, err := os.ReadFile(filepath.Join(home, ".azure", azProfileName))
-	if err != nil {
-		return "", false
-	}
-	// az writes the profile as UTF-8 with a byte-order mark, which
-	// encoding/json will not parse.
-	raw = bytes.TrimPrefix(raw, utf8BOM)
+// azProfile contains the selected subscription and its account identity.
+type azProfile struct {
+	Subscriptions []struct {
+		TenantID  string `json:"tenantId"`  // tenant owning this subscription.
+		IsDefault bool   `json:"isDefault"` // whether az selects this subscription.
+		User      struct {
+			Name string `json:"name"` // login name; an empty value cannot identify an account.
+			Type string `json:"type"` // only user logins can be matched to a token's user claim.
+		} `json:"user"` // account associated with the subscription.
+	} `json:"subscriptions"` // subscriptions known to az.
+}
 
+// expectedAccount reads the account used by a token invocation. Named contexts
+// use the companion contract's $CLOUDCTX_STORE/azure directory and must agree
+// with any pinned tenant. Unknown identities disable cache reuse.
+func expectedAccount(name string, run Runner) (azAccount, bool) {
+	var dir, pinnedTenant string
+	if name == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return azAccount{}, false
+		}
+		// A shared az child has AZURE_CONFIG_DIR stripped by childEnv.
+		dir = filepath.Join(home, ".azure")
+	} else {
+		info, err := ShowContext(name, run)
+		if err != nil || info.Store == "" {
+			return azAccount{}, false
+		}
+		dir, pinnedTenant = filepath.Join(info.Store, "azure"), info.Tenant
+	}
+	account, ok := readAzAccount(filepath.Join(dir, azProfileName))
+	if !ok || pinnedTenant != "" && !strings.EqualFold(account.Tenant, pinnedTenant) {
+		return azAccount{}, false
+	}
+	return account, true
+}
+
+// readAzAccount reads a profile, accepting only an identifiable default user.
+// It returns false for absent, corrupt, or unfamiliar profiles and never logs
+// their contents. Service-principal identities are not inferred from user claims.
+func readAzAccount(path string) (azAccount, bool) {
+	raw, err := os.ReadFile(path) //nolint:gosec // path is the selected Azure CLI directory plus its profile filename.
+	if err != nil {
+		return azAccount{}, false
+	}
 	var profile azProfile
-	if err = json.Unmarshal(raw, &profile); err != nil {
-		return "", false
+	if err = json.Unmarshal(bytes.TrimPrefix(raw, utf8BOM), &profile); err != nil {
+		return azAccount{}, false
 	}
 	for _, sub := range profile.Subscriptions {
-		if sub.IsDefault && sub.TenantID != "" {
-			return sub.TenantID, true
+		if sub.IsDefault && sub.TenantID != "" && sub.User.Name != "" && strings.EqualFold(sub.User.Type, "user") {
+			return azAccount{Tenant: sub.TenantID, User: sub.User.Name}, true
 		}
 	}
-	return "", false
+	return azAccount{}, false
 }

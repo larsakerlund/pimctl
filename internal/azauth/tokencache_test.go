@@ -202,6 +202,10 @@ func TestDropAndClearTokenCache(t *testing.T) {
 
 func TestAcquireCachedUsesTheCacheThenTheRunner(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	contextStore := t.TempDir()
+	writeAzProfile(t, filepath.Join(contextStore, "azure"), "tid-1", "someone@example.com")
+	ForgetContextCache()
+	t.Cleanup(ForgetContextCache)
 
 	// mints counts token acquisitions only. `cloudctx show` is a registry read
 	// that costs no az spawn, which is what makes checking the tenant on every
@@ -211,7 +215,7 @@ func TestAcquireCachedUsesTheCacheThenTheRunner(t *testing.T) {
 	expiry := time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000")
 	run := func(_ string, args ...string) ([]byte, []byte, error) {
 		if len(args) > 0 && args[0] == "show" {
-			return []byte("[contoso]\nazure_tenant = tid-1\n"), nil, nil
+			return []byte("[contoso]\nazure_tenant = tid-1\nstore: " + contextStore + "\n"), nil, nil
 		}
 		mints++
 		return []byte(`{"accessToken":"` + jwt + `","expiresOn":"` + expiry + `","tenant":"tid-1"}`), nil, nil
@@ -304,6 +308,10 @@ func TestExpiryParsesAzFormats(t *testing.T) {
 // token minted for them — the one failure this tool must not have.
 func TestCachedTokenIsRefusedForAnotherTenant(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	contextStore := t.TempDir()
+	writeAzProfile(t, filepath.Join(contextStore, "azure"), "tid-1", "someone@example.com")
+	ForgetContextCache()
+	t.Cleanup(ForgetContextCache)
 	ForgetContextCache()
 	t.Cleanup(ForgetContextCache)
 
@@ -313,7 +321,7 @@ func TestCachedTokenIsRefusedForAnotherTenant(t *testing.T) {
 	expiry := time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000")
 	run := func(_ string, args ...string) ([]byte, []byte, error) {
 		if len(args) > 0 && args[0] == "show" {
-			return []byte("[contoso]\nazure_tenant = " + tenant + "\n"), nil, nil
+			return []byte("[contoso]\nazure_tenant = " + tenant + "\nstore: " + contextStore + "\n"), nil, nil
 		}
 		mints++
 		return []byte(`{"accessToken":"` + jwt + `","expiresOn":"` + expiry + `","tenant":"tid-1"}`), nil, nil
@@ -343,8 +351,7 @@ func TestCachedTokenIsRefusedForAnotherTenant(t *testing.T) {
 		t.Error("the re-minted token should not be marked FromCache")
 	}
 
-	// A context that names no tenant is not checked — there is nothing to check
-	// against, and the entry's own context name still has to match.
+	// An unpinned context still checks the selected Azure CLI account.
 	tenant = ""
 	ForgetContextCache()
 	before := mints

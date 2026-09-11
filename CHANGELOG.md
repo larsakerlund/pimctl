@@ -15,6 +15,9 @@ The exit-code contract will not change without a major version.
 
 ### Fixed
 
+- Cached ARM tokens are reused only when the selected Azure CLI account still
+  matches both tenant and user. Missing account information forces a fresh token.
+
 - **`install.sh` no longer uses the GitHub API when it has no token.** The tag
   comes from where `/releases/latest` redirects, and the files from the
   release's public download URLs. An unauthenticated API caller gets sixty

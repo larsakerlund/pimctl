@@ -126,6 +126,7 @@ func installFakeRunner(t *testing.T, contexts []string) {
 	azauth.ForgetContextCache()
 	prevHome := testCloudctxHome
 	testCloudctxHome = filepath.Join(t.TempDir(), "cloudctx")
+	writeFakeProfiles(t, contexts)
 	t.Cleanup(func() {
 		testCloudctxHome = prevHome
 		azauth.ForgetContextCache()
@@ -161,6 +162,26 @@ func installFakeRunner(t *testing.T, contexts []string) {
 		}
 	}
 	t.Cleanup(func() { azauth.DefaultRunner = prev })
+}
+
+// writeFakeProfiles provides the selected account for each fake context.
+func writeFakeProfiles(t *testing.T, contexts []string) {
+	t.Helper()
+	for _, name := range contexts {
+		if name == "" {
+			continue
+		}
+		dir := filepath.Join(fakeContextStore(name), "azure")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeFile(
+			filepath.Join(dir, "azureProfile.json"),
+			`{"subscriptions":[{"tenantId":"tid-1","isDefault":true,"user":{"name":"test@example.com","type":"user"}}]}`,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // testCloudctxHome stands in for ~/.cloudctx: the root the fake registry's

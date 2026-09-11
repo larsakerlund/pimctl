@@ -28,7 +28,7 @@
 //     half-written entry.
 //   - A wider mode is refused on read, with [ErrCachePermissions]: a token
 //     another account can read is worse than no cache at all. Every other
-//     defect — absent, corrupt, wrong version, wrong context, wrong tenant — is
+//     defect — absent, corrupt, wrong version, wrong context, wrong tenant, wrong user — is
 //     an ordinary miss that mints a fresh token.
 //   - An entry stops being used [TokenCacheMargin] before it expires, because a
 //     token that dies halfway through a run is worse than one re-minted up

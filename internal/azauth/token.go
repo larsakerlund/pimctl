@@ -237,19 +237,9 @@ func TokenArgs(context string) (name string, args []string) {
 	return "cloudctx", append([]string{"exec", context, "--"}, append([]string{"az"}, azArgs...)...)
 }
 
-// AcquireCached returns a usable token for the context, from the on-disk cache
-// when one is valid and by invoking cloudctx/az when it is not.
-//
-// A cached entry is only used when it was minted for the tenant the context is
-// pinned to today. The cache lives outside cloudctx's per-context store, so
-// nothing sweeps it when a context is deleted and recreated against a different
-// tenant, or repointed at one — and a token for the wrong tenant is the one
-// failure this tool must not have. The tenant comes from `cloudctx show`, which
-// reads a local file and spawns no az, so the check costs a process launch
-// rather than the 1.23 s mint it protects.
-//
-// A context that names no tenant is not checked: there is nothing to check
-// against, and the entry's own context name still has to match.
+// AcquireCached reuses an unexpired token only when the selected Azure CLI
+// account still matches its tenant and user. Otherwise it invokes az and caches
+// the new token. refresh bypasses cache reads; cache write failures are silent.
 func AcquireCached(context string, run Runner, refresh bool) (*Token, error) {
 	if !refresh {
 		tok, ok, err := cachedTokenFor(context, run)
@@ -268,46 +258,22 @@ func AcquireCached(context string, run Runner, refresh bool) (*Token, error) {
 	return tok, nil
 }
 
-// cachedTokenFor returns the cached token for a context when there is one that
-// may still be used: unexpired, and minted for the tenant that context means
-// today.
-//
-// Where "today" comes from depends on the path, and neither costs an az spawn.
-// A named context is pinned to a tenant in cloudctx's registry, read with
-// `cloudctx show`. The shared `az login` is pinned to nothing, so its tenant is
-// whichever one az's own default subscription belongs to — a file read, no
-// cloudctx involved, which is what keeps the bare path working on a machine
-// that has never heard of cloudctx.
-//
-// Either source may decline to answer: cloudctx missing or the context gone,
-// az's profile absent or in a shape pimctl does not recognise. That makes the
-// check unenforceable rather than failed, so the cache is skipped and the token
-// minted, which fails loudly if something really is wrong. The only error
-// returned is a cache file whose mode has been widened, which the user needs
-// told about rather than silently worked around.
+// cachedTokenFor checks the selected account before reading a cached token.
+// A missing identity or a mismatch is a cache miss, never an invitation to use
+// the previous account. Permission errors from ReadTokenCache are returned.
 func cachedTokenFor(context string, run Runner) (tok *Token, ok bool, err error) {
-	wantTenant, known := expectedTenant(context, run)
+	account, known := expectedAccount(context, run)
 	if !known {
 		return nil, false, nil
 	}
-	return ReadTokenCache(context, wantTenant, TokenCacheMargin, run)
-}
-
-// expectedTenant is the tenant a context should have minted its token for.
-//
-// known is false when nothing can be said, in which case the caller mints
-// rather than trusting the cache. An empty tenantID with known true is a
-// context that names no tenant: there is nothing to compare, and the entry's
-// own context name still has to match.
-func expectedTenant(context string, run Runner) (tenantID string, known bool) {
-	if context == "" {
-		return defaultAzTenant()
+	tok, ok, err = ReadTokenCache(context, account.Tenant, TokenCacheMargin, run)
+	if err != nil || !ok {
+		return tok, ok, err
 	}
-	tenant, err := ContextTenant(context, run)
-	if err != nil {
-		return "", false
+	if tok.UserPrincipalName == "" || !strings.EqualFold(tok.UserPrincipalName, account.User) {
+		return nil, false, nil
 	}
-	return tenant, true
+	return tok, true, nil
 }
 
 // Acquire mints one ARM token for a cloudctx context and decodes its claims.
