@@ -183,6 +183,9 @@ Use the actual activation/deactivation outcomes together with status evidence.
 - If the user authorized deactivation of a role that status omits, target that
   role explicitly. If the user only asked to inspect access, report the
   uncertainty without deactivating anything.
+- If an eligibility the user was just granted is missing from `ls`, add
+  `--refresh` to re-read the listing from Azure. `--debug` prints a timing
+  breakdown to stderr and never the token.
 
 For additional flags and authentication details, use `pimctl up --help`,
 `pimctl down --help`, `pimctl status --help`, and `pimctl help auth`.

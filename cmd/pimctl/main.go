@@ -38,8 +38,10 @@ import (
 )
 
 // version can be stamped with `-ldflags "-X main.version=..."`. The Makefile
-// stamps internal/cli.Version instead; either works, and an unstamped build
-// falls back to the VCS revision recorded by the Go toolchain.
+// and goreleaser stamp internal/cli.Version instead; either works, and an
+// unstamped build falls back to the module version and VCS revision the Go
+// toolchain records. Whichever is set, `pimctl version` and `pimctl --version`
+// print it as `pimctl v<version> (<commit>, <go>, <os/arch>)`.
 var version string
 
 // main stamps the version, runs the command through run and exits with the code

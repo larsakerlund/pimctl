@@ -12,6 +12,7 @@ token minted by `az` and valid for about an hour.
 | `$CLOUDCTX_STORE/pimctl/active-<context>-<account>.json` | what this machine activated | `0600` |
 | `$XDG_CACHE_HOME/pimctl/eligibilities-<context>-<account>.json` | role names and scope ids | `0600` |
 | `$XDG_CACHE_HOME/pimctl/policies-<context>-<account>.json` | PIM policy per role and scope | `0600` |
+| `$XDG_CACHE_HOME/pimctl/cloudctx-version.json` | the probed cloudctx version, keyed by the binary's path, size and mtime, for 24 h | `0600` |
 | `$XDG_CONFIG_HOME/pimctl/{presets,state}.json` | saved selections, last justification | `0600` |
 
 The first two belong to one cloudctx context, so they live inside that context's
@@ -48,9 +49,10 @@ to another host or an HTTP downgrade is rejected before sending the token.
 
 ## Reducing what is kept
 
-- `pimctl cache clear` deletes the tokens, listings and policies. It leaves the
-  activation record alone, because deleting that makes the next `status`
-  under-report roles you still hold; `pimctl cache clear --all` deletes it too.
+- `pimctl cache clear` deletes the tokens, listings, policies and the probed
+  cloudctx version. It leaves the activation record alone, because deleting
+  that makes the next `status` under-report roles you still hold;
+  `pimctl cache clear --all` deletes it too.
 - Deactivate when you are done: `pimctl down`. A time-boxed role you are not
   using is still a role someone could use.
 - On a shared or multi-user machine, set `XDG_CACHE_HOME` somewhere only you can
