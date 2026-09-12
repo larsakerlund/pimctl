@@ -133,7 +133,7 @@ is reported per role.`,
 		&o.keys,
 		"key",
 		nil,
-		"select roles by the stable key shown in `pimctl list` (repeatable; prefixes allowed)",
+		"select roles by the stable key shown in 'pimctl list' (repeatable; prefixes allowed)",
 	)
 	f.StringVar(&o.preset, "preset", "", "select the roles saved in this preset")
 	f.StringVar(&o.savePreset, "save-preset", "", "save the selection under this preset name")
@@ -243,11 +243,18 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 // finishActivation plans and submits a resolved selection through the shared
 // policy, justification and reporting pipeline. Failures remain per role once
 // requests have been sent; project preflight errors abort before submission.
+//
+// failures are the context and eligibility problems already reported before
+// the selection; they make the run incomplete and so exit 1. The activation
+// listing behind future is not in that set: it is advisory to `up`, which ends
+// on ARM's answer to each request, so a scope it could not read is noted after
+// the results and never changes the exit code.
 func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, requested time.Duration,
 	rows, selected []row, interactive bool, future *activeFuture, failures []error,
 ) error {
 	ctx, opts := rc.Ctx, rc.Opts
-	failures = append(failures, markAlreadyActive(selected, future)...)
+	check := &activeCheck{future: future}
+	markAlreadyActive(selected, check)
 
 	// The plan comes first because it carries the policies, and the policies
 	// decide whether a justification is even wanted.
@@ -302,17 +309,20 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 	// That needs the activation listing, so wait for it here — but only if a
 	// result actually wants it, and only briefly. By this point the activations
 	// have made a full ARM round-trip, so it has almost always landed already.
-	if needsActiveWindow(results) {
-		if res, ok := future.Wait(rc.Timeouts.activeBackfill); ok {
-			failures = append(failures, res.errs...)
-			results = fillAlreadyActiveWindows(results, res.rows)
-		}
+	if needsActiveWindow(results) && check.wait(rc.Timeouts.activeBackfill) {
+		results = fillAlreadyActiveWindows(results, check.res.rows)
 	}
 
 	// Requests have already been sent to ARM, so nothing below may return early
 	// — the user must always see which roles activated and the right exit code.
 	rememberActivateRun(cmd, activationJustification(plan, justification), o.savePreset, selected)
-	return reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
+	runErr := reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
+	// The listing may have landed while the requests were in flight; what it
+	// says about scopes it could not read belongs under the table, as a caveat
+	// on the dimming and the UNTIL column, not in the exit code.
+	check.tryGet()
+	reportIncompleteActiveCheck(cmd.ErrOrStderr(), check.failures())
+	return runErr
 }
 
 // chooseRows narrows the eligible roles down to what the user asked for, and
@@ -388,18 +398,76 @@ func selectRows(
 	return sel, true, err
 }
 
+// activeCheck is the background activation listing as `up` consumes it. The
+// listing is advisory here: it dims the rows that are already held and
+// supplies the window an ALREADY ACTIVE result reports, while ARM's answer to
+// each request decides every outcome. So it is read into one snapshot however
+// many times it is consulted, and a scope it could not read is named exactly
+// once, after the results, and never counted as a failure of the run.
+type activeCheck struct {
+	future *activeFuture // the listing, possibly still in flight; nil means it was never started.
+	res    activeResult  // the listing once it has landed; the zero value until then.
+	landed bool          // whether res holds the listing.
+}
+
+// tryGet takes the listing if it has already landed and reports whether it
+// has. It never blocks; see [activeFuture.TryGet].
+func (c *activeCheck) tryGet() bool {
+	if !c.landed {
+		c.res, c.landed = c.future.TryGet()
+	}
+	return c.landed
+}
+
+// wait blocks up to timeout for the listing and reports whether it landed in
+// time; see [activeFuture.Wait]. A listing already taken returns at once.
+func (c *activeCheck) wait(timeout time.Duration) bool {
+	if !c.landed {
+		c.res, c.landed = c.future.Wait(timeout)
+	}
+	return c.landed
+}
+
+// failures returns the scopes the listing could not read, as it reported them,
+// or nil while the listing has not landed: nothing was checked, so nothing was
+// found wanting.
+func (c *activeCheck) failures() []error {
+	if !c.landed {
+		return nil
+	}
+	return c.res.errs
+}
+
 // markAlreadyActive marks the rows the slow activation listing says are already
 // held, if that listing has landed. It never waits for it: ARM answers
 // RoleAssignmentExists and pimctl reports ALREADY ACTIVE, which is the same
 // information a moment later.
-func markAlreadyActive(selected []row, future *activeFuture) []error {
-	res, ok := future.TryGet()
-	if !ok {
-		return nil
+func markAlreadyActive(selected []row, check *activeCheck) {
+	if !check.tryGet() {
+		return
 	}
-	active, activeErrs := res.rows, res.errs
-	copy(selected, applyActive(slices.Clone(selected), active))
-	return activeErrs
+	copy(selected, applyActive(slices.Clone(selected), check.res.rows))
+}
+
+// reportIncompleteActiveCheck names on w the scopes the activation listing
+// could not read, one per line under a note saying what that does and does not
+// mean, and prints nothing for an empty list. It goes to stderr so `-o json`
+// stdout stays machine-readable, and after the results table because the
+// table is ARM's per-request answer and this is only a caveat on the dimming
+// and the UNTIL column.
+func reportIncompleteActiveCheck(w io.Writer, errs []error) {
+	if len(errs) == 0 {
+		return
+	}
+	fmt.Fprintf(
+		w,
+		"note: the already-active check could not read %d scope(s); "+
+			"each role's result above is ARM's own answer to its request:\n",
+		len(errs),
+	)
+	for _, err := range errs {
+		fmt.Fprintf(w, "  %v\n", err)
+	}
 }
 
 // needsActiveWindow reports whether any already-active result is missing the

@@ -1,7 +1,8 @@
 // Tests for the `up`/`activate` command end to end: flag validation before
 // any network call, selection, clamping, the exit code each mix of outcomes
-// earns, and the JSON keys. The ARM bodies those runs send are pinned in
-// request_test.go.
+// earns, the JSON keys, and the advisory role of the activation listing — a
+// scope it cannot read is noted, never an exit code. The ARM bodies those runs
+// send are pinned in request_test.go.
 
 package cli
 
@@ -9,7 +10,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -531,6 +535,189 @@ func TestResultJSONCarriesTheKey(t *testing.T) {
 	for _, r := range results {
 		if r.Key == "" {
 			t.Errorf("a result must carry its selection key:\n%s", out)
+		}
+	}
+}
+
+// forbiddenListingTransport answers 403 to the activation listing at one scope
+// and hands every other request to the fake ARM unchanged, so a test can make
+// the already-active check fail for a scope while the activations themselves
+// go through.
+type forbiddenListingTransport struct {
+	base  http.RoundTripper
+	scope string
+}
+
+func (f forbiddenListingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	listing := f.scope + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances"
+	if r.Method == http.MethodGet && strings.EqualFold(r.URL.Path, listing) {
+		body := `{"error":{"code":"AuthorizationFailed","message":"The client does not have authorization to perform action 'Microsoft.Authorization/roleAssignmentScheduleInstances/read'."}}`
+		return &http.Response{
+			StatusCode:    http.StatusForbidden,
+			Status:        "403 Forbidden",
+			Header:        http.Header{"Content-Type": {"application/json"}},
+			Body:          io.NopCloser(strings.NewReader(body)),
+			ContentLength: int64(len(body)),
+			Request:       r,
+		}, nil
+	}
+	return f.base.RoundTrip(r)
+}
+
+// forbidListingAt installs the 403 for the activation listing at scope on
+// every session the test's opener produces.
+func forbidListingAt(t *testing.T, scope string) {
+	t.Helper()
+	open := fakeOpener
+	installSessionOpener(t, func(res resolution, tm *timings, refresh bool) ([]*session, []error, error) {
+		sessions, failures, err := open(res, tm, refresh)
+		for _, s := range sessions {
+			s.Client.HTTP.Transport = forbiddenListingTransport{base: s.Client.HTTP.Transport, scope: scope}
+		}
+		return sessions, failures, err
+	})
+}
+
+// TestUpNotesAnUnreadableScopeWithoutFailing: the activation listing is
+// advisory to `up`, which ends on ARM's answer to each request. A scope the
+// listing cannot read is therefore named under the results, once, and does not
+// turn a successful run into exit 1. The RoleAssignmentExists answer makes the
+// result want the listing, so this is the path that waits for it.
+func TestUpNotesAnUnreadableScopeWithoutFailing(t *testing.T) {
+	elig := twoLowImpactRoles()[:1]
+	f := &fakeARM{t: t, eligibilities: elig}
+	f.setPutErr(func(string) (int, string) {
+		return 400, `{"error":{"code":"RoleAssignmentExists","message":"The Role assignment already exists."}}`
+	})
+	f.install()
+	forbidListingAt(t, elig[0].Properties.Scope)
+
+	out, errOut, err := runCmd(t, "up", "-c", "contoso", "--all", "-j", "x", "-y")
+	if err != nil {
+		t.Fatalf("a listing the run does not depend on must not fail it: %v\nstderr: %s", err, errOut)
+	}
+	if !strings.Contains(out, "ALREADY ACTIVE") {
+		t.Fatalf("ARM's answer was not reported:\n%s", out)
+	}
+	if strings.Contains(errOut, "query failure") {
+		t.Errorf("the listing failure was counted against the run: %q", errOut)
+	}
+	if !strings.Contains(errOut, "already-active check could not read 1 scope(s)") {
+		t.Errorf("the incomplete check was not noted: %q", errOut)
+	}
+	if !strings.Contains(errOut, "Contoso landing zones") {
+		t.Errorf("the note does not name the scope: %q", errOut)
+	}
+	if n := strings.Count(errOut, "AuthorizationFailed"); n != 1 {
+		t.Errorf("the scope was named %d times, want exactly once: %q", n, errOut)
+	}
+}
+
+// TestUpWithAnUnreadableScopeActivatesAndExitsZero: when the listing is not
+// needed at all — the role simply activates — its failure still cannot change
+// the exit code, whether or not it has landed by the time the results print.
+func TestUpWithAnUnreadableScopeActivatesAndExitsZero(t *testing.T) {
+	elig := twoLowImpactRoles()[:1]
+	f := &fakeARM{t: t, eligibilities: elig}
+	f.install()
+	forbidListingAt(t, elig[0].Properties.Scope)
+
+	out, errOut, err := runCmd(t, "up", "-c", "contoso", "--all", "-j", "x", "-y")
+	if err != nil {
+		t.Fatalf("up: %v\nstderr: %s", err, errOut)
+	}
+	if !strings.Contains(out, "ACTIVATED") {
+		t.Errorf("results:\n%s", out)
+	}
+	if strings.Contains(errOut, "query failure") || strings.Contains(errOut, "warning:") {
+		t.Errorf("the listing failure was reported as a failure of the run: %q", errOut)
+	}
+	if n := strings.Count(errOut, "AuthorizationFailed"); n > 1 {
+		t.Errorf("the scope was named %d times, want at most once: %q", n, errOut)
+	}
+}
+
+// TestActiveCheckNamesAnUnreadableScopeOnceWheneverItLands pins the property
+// the command tests cannot time: the listing's failures are read from one
+// snapshot, so an interactive run (the picker gives the listing time to land
+// first) and an unattended one (it lands after the requests went out, or
+// never) name a failed scope the same way — once, or not at all.
+func TestActiveCheckNamesAnUnreadableScopeOnceWheneverItLands(t *testing.T) {
+	failed := errors.New("listing active roles at Contoso landing zones in contoso: 403 AuthorizationFailed")
+	res := activeResult{errs: []error{failed}}
+	assertOnce := func(t *testing.T, check *activeCheck) {
+		t.Helper()
+		got := check.failures()
+		if len(got) != 1 || !errors.Is(got[0], failed) {
+			t.Fatalf("failures = %v, want exactly [%v]", got, failed)
+		}
+	}
+
+	t.Run("landed before the selection, as after the picker", func(t *testing.T) {
+		check := &activeCheck{future: &activeFuture{got: true, res: res}}
+		if !check.tryGet() {
+			t.Fatal("a latched listing must be taken at once")
+		}
+		if !check.wait(0) || !check.tryGet() {
+			t.Fatal("a taken listing must stay taken")
+		}
+		assertOnce(t, check)
+	})
+
+	t.Run("landed after the requests went out, as under -y", func(t *testing.T) {
+		fut := &activeFuture{ch: make(chan activeResult, 1)}
+		check := &activeCheck{future: fut}
+		if check.tryGet() {
+			t.Fatal("nothing has landed yet")
+		}
+		if check.failures() != nil {
+			t.Fatal("a listing that has not landed has nothing to report")
+		}
+		fut.ch <- res
+		if !check.wait(time.Second) {
+			t.Fatal("the listing landed and must be taken")
+		}
+		check.tryGet()
+		assertOnce(t, check)
+	})
+
+	t.Run("never landed", func(t *testing.T) {
+		check := &activeCheck{future: &activeFuture{ch: make(chan activeResult, 1)}}
+		check.tryGet()
+		check.wait(time.Millisecond)
+		check.tryGet()
+		if check.failures() != nil {
+			t.Fatalf("failures = %v, want none from a listing that never landed", check.failures())
+		}
+	})
+
+	t.Run("never started", func(t *testing.T) {
+		check := &activeCheck{}
+		if check.tryGet() || check.wait(time.Millisecond) || check.failures() != nil {
+			t.Fatal("a nil future never lands")
+		}
+	})
+}
+
+// TestReportIncompleteActiveCheckIsSilentWhenComplete keeps the note off every
+// run whose listing read cleanly, and names each failed scope when it did not.
+func TestReportIncompleteActiveCheckIsSilentWhenComplete(t *testing.T) {
+	var buf bytes.Buffer
+	reportIncompleteActiveCheck(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("a clean listing printed a note: %q", buf.String())
+	}
+	reportIncompleteActiveCheck(&buf, []error{
+		errors.New("listing active roles at QA in contoso: 403"),
+		errors.New("listing active roles at Contoso landing zones in contoso: 403"),
+	})
+	text := buf.String()
+	if !strings.HasPrefix(text, "note: the already-active check could not read 2 scope(s)") {
+		t.Errorf("note = %q", text)
+	}
+	for _, scope := range []string{"QA", "Contoso landing zones"} {
+		if !strings.Contains(text, scope) {
+			t.Errorf("note does not name %s: %q", scope, text)
 		}
 	}
 }
