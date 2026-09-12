@@ -110,14 +110,16 @@ func runStatus(cmd *cobra.Command, rc *runContext, fast, wait bool) ([]activeRow
 		active, listErrs, slow := listActivations(rc.Ctx, rc, nil)
 		merged := reconcileActive(rc, &local, activeResult{rows: active, unconfirmed: slow})
 		sp.Stop()
-		printStatus(cmd, rc, merged, slow)
+		printStatus(cmd, rc, merged, slow, false)
 		reportUnconfirmedScopes(cmd, rc, slow)
 		reportRecordDrops(cmd, local, active, slow)
 		return merged, listErrs
 	}
 
+	// What is printed here is the record, not Azure: an empty table says so,
+	// or a reader who keeps only stdout takes "no roles" for Azure's answer.
 	local := readLocalRecord(rc)
-	printStatus(cmd, rc, local.rows, nil)
+	printStatus(cmd, rc, local.rows, nil, true)
 
 	// Reconcile in the background and report only the difference, so the fast
 	// answer is never silently wrong.

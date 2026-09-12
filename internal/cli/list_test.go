@@ -339,7 +339,9 @@ func TestListRespectsDeactivationTombstone(t *testing.T) {
 
 func assertListReconciled(t *testing.T, output, notices string) {
 	t.Helper()
-	if !strings.Contains(output, "?") {
+	// The legend line, not any question mark: a "?" inside a role or scope
+	// name would satisfy the looser check without a single row being marked.
+	if !strings.Contains(output, "? = activation state is unconfirmed") {
 		t.Errorf("local state lacks a confidence marker: %s", output)
 	}
 	if !strings.Contains(notices, "activated elsewhere") {

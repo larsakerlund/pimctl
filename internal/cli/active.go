@@ -52,15 +52,14 @@ const (
 // Unconfirmed reports whether Azure has confirmed the row.
 func (r activeRow) Unconfirmed() bool { return r.State != RowConfirmed }
 
-// String names the state for JSON output.
+// String names the state for JSON output. Anything that is not one of the two
+// unconfirmed states reads as confirmed, which is the zero value's meaning.
 func (s rowState) String() string {
 	switch s {
 	case RowConfirming:
 		return "confirming"
 	case RowUnconfirmed:
 		return "unconfirmed"
-	case RowConfirmed:
-		return "confirmed"
 	default:
 		return "confirmed"
 	}
@@ -73,8 +72,6 @@ func (s rowState) marker() string {
 		return "~"
 	case RowUnconfirmed:
 		return "?"
-	case RowConfirmed:
-		return ""
 	default:
 		return ""
 	}
@@ -109,10 +106,10 @@ type activeResult struct {
 
 // timeouts are a run's time budgets, gathered in one value on [runContext].
 //
-// They were package variables, which meant a test shortening one had to
-// remember to put it back, and two tests could not have wanted different values
-// at the same time. Every field is a measurement or a judgement about ARM, and
-// the comments say which.
+// One value rather than package variables, so a test that shortens a budget
+// touches no global state that has to be put back, and two tests can hold
+// different budgets at the same time. Every field is a measurement or a
+// judgement about ARM, and the comments say which.
 type timeouts struct {
 	// scopeSoftDeadline bounds one per-scope activation listing.
 	//
@@ -166,8 +163,8 @@ func defaultTimeouts() timeouts {
 // always reports "not arrived".
 //
 // Reading activation state is the expensive half of pimctl however it is done:
-// ARM's roleAssignmentScheduleInstances?$filter=asTarget() takes 12–19 seconds
-// on this tenant — reproducibly, and independently of pimctl — and the per-scope
+// ARM's roleAssignmentScheduleInstances?$filter=asTarget() takes 11-21 s on
+// this tenant — reproducibly, and independently of pimctl — and the per-scope
 // fan-out that replaced it still costs seconds. Eligibility comes back in about
 // two. Blocking the picker on the slow call made every `up` a quarter-minute of
 // silence, so the two are decoupled: eligibility drives the UI, activation state
@@ -317,9 +314,9 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 		// visible instead of quietly reporting fewer roles than are held.
 		if (callCtx.Err() != nil && ctx.Err() == nil) || isThrottled(err) {
 			// The scope id, not a label: this list is matched against record
-			// entries as well as printed, and labelling it here once made every
-			// row at an unread scope silently vanish. Presentation happens at
-			// the point of printing.
+			// entries as well as printed, and a label here would match no
+			// entry, so every row at an unread scope would silently vanish.
+			// Presentation happens at the point of printing.
 			return
 		}
 		// One unreadable scope must not sink the rest: the user may simply have
@@ -338,8 +335,8 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 // listActivations lists the user's live activations.
 //
 // By default it fans out over the distinct scopes the user is eligible at,
-// rather than making ARM's tenant-wide asTarget() call. That call takes 11-21
-// seconds and silently drops rows: three runs against an unchanged tenant
+// rather than making ARM's tenant-wide asTarget() call. That call takes 11-21 s
+// and silently drops rows: three runs against an unchanged tenant
 // returned 126, 131 and 132 instances with no nextLink. --all-scopes restores
 // the old behaviour.
 //
@@ -454,7 +451,10 @@ func dedupeActivations(rows []activeRow) []activeRow {
 	return out
 }
 
-// sortActivations orders activations for stable display.
+// sortActivations orders rows by context, then role name, then scope name —
+// the order the tables print in — and keeps the incoming order for rows that
+// compare equal, so two runs over the same listing render identically whatever
+// order the fan-out's goroutines delivered the rows in.
 func sortActivations(out []activeRow) {
 	slices.SortStableFunc(out, func(a, b activeRow) int {
 		return cmp.Or(
@@ -489,8 +489,8 @@ func eligibleScopes(
 		// A cold cache is not a reason to give up on the fan-out. Reading the
 		// eligibilities costs well under a second, and it is the difference
 		// between a per-scope read and the tenant-wide call that is slow and
-		// drops rows: `cache clear` followed by a piped `status` took two
-		// minutes and exited 1 because this returned nothing here.
+		// drops rows: returning nothing here would send every `status` after
+		// a `cache clear` down that path.
 		var elig []armclient.Eligibility
 		err := rc.Timings.Track("ARM roleEligibilityScheduleInstances ("+label+")", func() error {
 			return retryOn401(s, func() error {
@@ -500,10 +500,10 @@ func eligibleScopes(
 			})
 		})
 		if err != nil {
-			// Swallowing this is what made the fallback silent — and a 401 on a
-			// freshly minted token, which retryOn401 exists to absorb, was not
-			// even retried. The caller decides what to do; it must not read
-			// this as "eligible for nothing".
+			// The error is returned, not swallowed: swallowed, it reads as
+			// "eligible for nothing" and sends the caller to the lossy
+			// tenant-wide fallback without a word. The caller decides what
+			// to do with it.
 			errs = append(errs, fmt.Errorf("listing eligible roles in %s: %w", label, err))
 			unknown = append(unknown, activationScope{Context: label})
 			continue
@@ -541,9 +541,7 @@ func listTenantWide(ctx context.Context, sessions []*session) ([]activeRow, []er
 		wg      sync.WaitGroup
 	)
 	for _, s := range sessions {
-		wg.Add(1)
-		go func(s *session) {
-			defer wg.Done()
+		wg.Go(func() {
 			active, err := s.Client.ListActivated(ctx)
 			if err != nil {
 				mu.Lock()
@@ -557,7 +555,7 @@ func listTenantWide(ctx context.Context, sessions []*session) ([]activeRow, []er
 				out = append(out, activeRow{Context: s.Token.Label(), Session: s, Assignment: a})
 			}
 			mu.Unlock()
-		}(s)
+		})
 	}
 	wg.Wait()
 	sortActivations(out)
