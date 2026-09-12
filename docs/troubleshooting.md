@@ -11,6 +11,7 @@
 | `requires ticket information` | Supply `--ticket-number` and `--ticket-system` |
 | Project tenant mismatch | Choose a login for the required tenant |
 | Missing or ambiguous project eligibility | Check the file's exact targets and your eligible roles with `ls`; pimctl will not guess a grant |
+| `request exists (…): an earlier request for this role is still open` | ARM refuses a second request while an earlier one is undecided, typically one still waiting on an approver. The role is not held and the run exits 1; check `pimctl status`, and wait for the open request to be decided or withdraw it in the portal before retrying |
 
 An approval-pending result (exit 2) means access has not changed yet. For a
 partial failure, inspect the per-role outcomes before retrying.

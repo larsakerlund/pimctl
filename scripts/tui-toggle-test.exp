@@ -10,8 +10,10 @@
 # confirmed after the filter moves on, or the selection is a lie.
 #
 # Usage:
-#   go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
-#   expect scripts/tui-toggle-test.exp /tmp/pimctl-tuiprobe
+#   go build -tags tuiprobe -o bin/pimctl-tuiprobe ./cmd/tuiprobe
+#   expect scripts/tui-toggle-test.exp bin/pimctl-tuiprobe
+#
+# `make tui-test` does both, for every script in this directory.
 
 set bin [lindex $argv 0]
 set timeout 20

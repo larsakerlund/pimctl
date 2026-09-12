@@ -9,8 +9,10 @@
 # matches, checks the picker says so, and clears it with esc.
 #
 # Usage:
-#   go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
-#   expect scripts/tui-filter-test.exp /tmp/pimctl-tuiprobe
+#   go build -tags tuiprobe -o bin/pimctl-tuiprobe ./cmd/tuiprobe
+#   expect scripts/tui-filter-test.exp bin/pimctl-tuiprobe
+#
+# `make tui-test` does both, for every script in this directory.
 #
 # Note: every send must be preceded by an expect that drains the pty, or the
 # child blocks on a full output buffer and never sees the keystroke.

@@ -8,7 +8,7 @@ token minted by `az` and valid for about an hour.
 
 | Path | Contents | Mode |
 |---|---|---|
-| `$CLOUDCTX_STORE/pimctl/token-<context>.json` | one ARM access token per context | `0600` in a `0700` directory |
+| `$CLOUDCTX_STORE/pimctl/token-<context>.json` | one ARM access token per context, with az's epoch `expires_on` preferred over its local-time expiry string | `0600` in a `0700` directory; refused if the directory is group- or other-accessible |
 | `$CLOUDCTX_STORE/pimctl/active-<context>-<account>.json` | what this machine activated | `0600` |
 | `$XDG_CACHE_HOME/pimctl/eligibilities-<context>-<account>.json` | role names and scope ids | `0600` |
 | `$XDG_CACHE_HOME/pimctl/policies-<context>-<account>.json` | PIM policy per role and scope | `0600` |

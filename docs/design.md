@@ -137,8 +137,15 @@ ownership are ignored; role caches are fetched again from ARM.
 every context's store.
 
 The file is `0600` inside a `0700` directory, written atomically, and **refused
-on read** if anything has widened those permissions: a token another account can
-read is worse than no cache at all. `az` itself already keeps access and refresh
+on read** if anything has widened those permissions — the file's, and
+separately the directory's: a directory that grants group or other any access
+is refused as `ErrCacheDirPermissions`, distinct from the file's own
+`ErrCachePermissions` so the message names the thing to chmod. A token another
+account can read is worse than no cache at all. The entry stores az's epoch
+`expires_on` alongside its local-time `expiresOn` string and prefers the epoch
+when deciding whether the token is still usable, because an epoch does not move
+when the machine's time zone does; the string is only the fallback for an `az`
+that reports no epoch. `az` itself already keeps access and refresh
 tokens unencrypted in `~/.azure/msal_token_cache.json` at `0600`, so this is a
 second copy of a credential the machine already holds rather than a new class of
 exposure. The token is never printed, never logged, never put in an error, and
@@ -288,7 +295,11 @@ opaque *"Resource was disallowed by policy"* instead of the claims challenge.
 
 **`HTTP 429` / throttling.** ARM rate-limits role-management reads per account.
 pimctl retries throttled and transient (503/504) responses up to four times,
-honouring the `Retry-After` header, before giving up with an explanation.
+honouring the `Retry-After` header, before giving up with an explanation. The
+sleep before any one retry is capped at `MaxRetryDelay` (60 s): a `Retry-After`
+of hours would otherwise park the CLI for that long on every attempt, and a
+minute is longer than any throttling window seen on this tenant. The error a
+caller inspects still carries the value ARM sent; only the sleep is clamped.
 
 **`RoleAssignmentExists`.** The role is already active. pimctl reports
 `ALREADY ACTIVE` and does not treat it as a failure.
