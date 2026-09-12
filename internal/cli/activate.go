@@ -37,12 +37,9 @@ type activateOpts struct {
 	keys       []string
 	preset     string // --preset: a saved selection, which also supplies the contexts.
 	savePreset string // --save-preset: save this run's selection under that name.
-	// forDuration, hours and duration are the three spellings of the
-	// activation length — only one may be given, and the latter two are
-	// deprecated. All empty or zero means each role's policy maximum.
+	// forDuration is --for, the activation length. Empty means each role's
+	// policy maximum.
 	forDuration string
-	hours       float64 // --hours, deprecated.
-	duration    string  // --duration, deprecated.
 	// justification is -j. It lands in the PIM audit log, and is required when
 	// there is no terminal to prompt on.
 	justification string
@@ -144,12 +141,6 @@ is reported per role.`,
 		"how long to activate for: 2h, 90m, 1h30m or PT2H30M (default: each role's policy maximum)",
 	)
 	f.BoolVar(&o.force, "force", false, "allow a non-interactive selection of more than 10 roles")
-	f.Float64Var(&o.hours, "hours", 0, "")
-	f.StringVar(&o.duration, "duration", "", "")
-	// MarkDeprecated only fails when the flag does not exist; both are defined
-	// two lines up, so the error is unreachable.
-	f.MarkDeprecated("hours", "use --for instead, e.g. --for 2h")         //nolint:errcheck // see above
-	f.MarkDeprecated("duration", "use --for instead, e.g. --for PT2H30M") //nolint:errcheck // see above
 	f.StringVarP(&o.justification, "justification", "j", "", "justification sent with every activation")
 	f.StringVar(&o.ticketNumber, "ticket-number", "", "ticket number, for roles whose policy requires ticketing")
 	f.StringVar(&o.ticketSystem, "ticket-system", "", "ticket system name, used with --ticket-number")
@@ -475,7 +466,7 @@ func prepareActivation(cmd *cobra.Command, opts *globalOpts, o *activateOpts) (t
 	if err := resolveActivationProject(cmd, o); err != nil {
 		return 0, err
 	}
-	requested, err := requestedDuration(cmd, o.forDuration, o.hours, o.duration)
+	requested, err := requestedDuration(cmd, o.forDuration)
 	if err != nil {
 		return 0, err
 	}

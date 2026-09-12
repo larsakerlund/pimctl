@@ -24,7 +24,7 @@ func TestActivateBatchTwoRoles(t *testing.T) {
 	f.install()
 	out, _, err := runCmd(t, "activate", "-c", "contoso",
 		"--role", "Cost Management Contributor", "--role", "Resource Policy Contributor",
-		"--hours", "1", "--justification", "unit test", "-y")
+		"--for", "1h", "--justification", "unit test", "-y")
 	if err != nil {
 		t.Fatalf("activate: %v\n%s", err, out)
 	}
@@ -45,7 +45,7 @@ func TestActivateBatchTwoRoles(t *testing.T) {
 		si := mustObject(t, props, "scheduleInfo")
 		exp := mustObject(t, si, "expiration")
 		if exp["duration"] != "PT1H" {
-			t.Errorf("duration = %v, want PT1H (--hours 1 under the PT4H maximum)", exp["duration"])
+			t.Errorf("duration = %v, want PT1H (--for 1h under the PT4H maximum)", exp["duration"])
 		}
 	}
 	if strings.Count(out, "ACTIVATED") < 2 {
@@ -56,7 +56,7 @@ func TestActivateBatchTwoRoles(t *testing.T) {
 func TestActivateClampsToPolicyMaximum(t *testing.T) {
 	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()[:1], maxDuration: "PT1H"}
 	f.install()
-	out, _, err := runCmd(t, "activate", "-c", "contoso", "--role", "Cost Management", "--hours", "8", "-j", "x", "-y")
+	out, _, err := runCmd(t, "activate", "-c", "contoso", "--role", "Cost Management", "--for", "8h", "-j", "x", "-y")
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}
@@ -289,13 +289,13 @@ func TestActivateJSONUsesLowerCamelKeys(t *testing.T) {
 	}
 }
 
-// TestActivateHoursZeroRejected pins MED-9 end to end.
-func TestActivateHoursZeroRejected(t *testing.T) {
+// TestActivateForZeroRejected pins MED-9 end to end.
+func TestActivateForZeroRejected(t *testing.T) {
 	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()[:1]}
 	f.install()
-	_, _, err := runCmd(t, "activate", "-c", "contoso", "--all", "-j", "x", "--hours", "0", "-y")
+	_, _, err := runCmd(t, "activate", "-c", "contoso", "--all", "-j", "x", "--for", "0s", "-y")
 	if err == nil {
-		t.Fatal("--hours 0 must be rejected, not read as 'use the policy maximum'")
+		t.Fatal("--for 0s must be rejected, not read as 'use the policy maximum'")
 	}
 	if len(f.putBodies()) != 0 {
 		t.Error("nothing should have been sent to ARM")
