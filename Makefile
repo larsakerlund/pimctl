@@ -2,14 +2,14 @@ BINARY  := pimctl
 MODULE  := github.com/larsakerlund/pimctl
 PREFIX  ?= $(HOME)/.local
 # zsh reads completions from any directory on $fpath; this one is conventional
-# for a per-user install and is what the README tells you to add.
+# for a per-user install and is what docs/setup.md tells you to add.
 ZSH_COMPLETION_DIR ?= $(PREFIX)/share/zsh/site-functions
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X $(MODULE)/internal/cli.Version=$(VERSION)
 
 # What `make check` needs installed: the Go toolchain, golangci-lint (pinned in
 # .golangci.yml), shellcheck, and expect(1) for the picker tests. `vuln` fetches
-# govulncheck through `go run`, so it also needs the network.
+# govulncheck (pinned below) through `go run`, so it also needs the network.
 #
 # Every binary lives under cmd/: cmd/pimctl is what ships, cmd/tuiprobe is the
 # pty test probe. internal/tools/doccheck stays out of it — it is a build gate
@@ -31,14 +31,18 @@ vet:
 # The interactive picker needs a real terminal, so it is covered by expect(1)
 # driving a probe binary built behind the `tuiprobe` tag. It lives in
 # cmd/tuiprobe with every other binary; nothing from that tag is compiled into
-# the shipped pimctl binary.
+# the shipped pimctl binary. The probe is built into bin/ like every other
+# build output, so two checkouts on one machine do not overwrite each other's
+# probe and `make clean` takes it away with the rest.
+TUIPROBE := bin/pimctl-tuiprobe
+
 tui-test:
 	sh scripts/test-tui-harness.sh
-	go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
-	expect scripts/tui-filter-test.exp /tmp/pimctl-tuiprobe
-	expect scripts/tui-toggle-test.exp /tmp/pimctl-tuiprobe
-	expect scripts/tui-scope-test.exp /tmp/pimctl-tuiprobe
-	expect scripts/tui-justification-test.exp /tmp/pimctl-tuiprobe
+	go build -tags tuiprobe -o $(TUIPROBE) ./cmd/tuiprobe
+	expect scripts/tui-filter-test.exp $(TUIPROBE)
+	expect scripts/tui-toggle-test.exp $(TUIPROBE)
+	expect scripts/tui-scope-test.exp $(TUIPROBE)
+	expect scripts/tui-justification-test.exp $(TUIPROBE)
 
 # The suite again, with every PATH entry that holds a cloudctx removed.
 #
@@ -104,15 +108,28 @@ doccheck:
 # The security gate. govulncheck reports only the vulnerabilities pimctl's own
 # call graph can actually reach, so a finding here is a real one rather than a
 # note about an unused corner of a dependency. It runs through `go run` so there
-# is nothing to install and nothing to keep in step by hand, and under the
-# module's own toolchain — which is what decides whether a standard-library
-# advisory applies, so bump `toolchain` in go.mod to clear one.
+# is nothing to install, and under the module's own toolchain — which is what
+# decides whether a standard-library advisory applies, so bump `toolchain` in
+# go.mod to clear one. The version is pinned so a run today and a run in CI
+# tomorrow use the same checker: an unpinned `@latest` resolves to whatever was
+# tagged most recently, and a scanner that changes under the gate is a gate
+# whose failures cannot be reproduced. Bump it here on purpose, like any other
+# dependency.
+GOVULNCHECK_VERSION := v1.8.0
+
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 # What has to be green before a change is done.
+#
+# The race run repeats every test twice in one process. A test that leaks state
+# — a package-level variable it set, an environment variable it did not restore,
+# a file it left where the next test looks — passes on its own and fails only on
+# the second pass, so -count=2 is what makes an isolation bug fail here instead
+# of in whichever order CI happens to schedule. test-nocloudctx stays at one
+# pass: its subject is PATH, not order.
 check: fmt-check lint vet doccheck vuln
-	go test -race -count=1 ./...
+	go test -race -count=2 ./...
 	$(MAKE) test-nocloudctx
 	$(MAKE) tui-test
 
@@ -125,5 +142,8 @@ install:
 	@echo "  if completion does not work, add this above compinit in ~/.zshrc:"
 	@echo "    fpath=($(ZSH_COMPLETION_DIR) \$$fpath)"
 
+# Everything a build can leave behind: bin/ from `make build` and `make
+# tui-test`, dist/ from goreleaser, and the binary `go build ./cmd/...` or `go
+# build ./internal/tools/doccheck` drops in the working directory.
 clean:
-	rm -rf bin
+	rm -rf bin dist $(BINARY) tuiprobe doccheck

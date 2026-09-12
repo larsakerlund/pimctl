@@ -352,6 +352,11 @@ verify_archive() {
 # existing one: a rename within a directory is atomic, so an interrupted
 # install cannot leave a half-written pimctl on the PATH, and it replaces a
 # copy that is currently running instead of failing with ETXTBSY.
+#
+# The staging file comes from mktemp, not from a name built out of the pid: a
+# predictable name in a shared install directory can be planted in advance as a
+# symlink, and cp would then write the binary wherever the link points. mktemp
+# creates the file itself, with a random name, and fails if it already exists.
 install_binary() {
   tar -xzf "$work/$archive" -C "$work" ||
     die "cannot unpack $archive"
@@ -362,8 +367,12 @@ install_binary() {
     die "\$HOME is not set; point PIMCTL_INSTALL_DIR at a directory instead"
   mkdir -p "$install_dir" || die "cannot create $install_dir"
 
-  staged="$install_dir/.pimctl.install.$$"
-  cp "$work/pimctl" "$staged" || die "cannot write to $install_dir"
+  staged=$(mktemp "$install_dir/.pimctl.install.XXXXXX") ||
+    die "cannot write to $install_dir"
+  cp "$work/pimctl" "$staged" || {
+    rm -f "$staged"
+    die "cannot write to $install_dir"
+  }
   chmod 0755 "$staged" || {
     rm -f "$staged"
     die "cannot make $staged executable"

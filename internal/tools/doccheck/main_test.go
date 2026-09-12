@@ -1,10 +1,13 @@
 // Tests for the parts that touch the filesystem and the command line: how a
-// package pattern turns into a directory, which files a walk picks up, and the
-// one rule that spans a whole package. The per-file rules are in check_test.go.
+// package pattern turns into a directory, which files a walk picks up, the one
+// rule that spans a whole package, and what -h and an unknown flag do to the
+// output and the exit status. The per-file rules are in check_test.go.
 
 package main
 
 import (
+	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -136,6 +139,89 @@ func TestRunOnACleanPackageSaysSo(t *testing.T) {
 func TestRunRejectsAMissingDirectory(t *testing.T) {
 	if _, err := run([]string{filepath.Join(t.TempDir(), "nope")}, io.Discard, io.Discard); err == nil {
 		t.Error("run on a missing directory returned no error")
+	}
+}
+
+func TestRunHelpPrintsUsageToStdout(t *testing.T) {
+	for _, flagName := range []string{"-h", "-help", "--help"} {
+		t.Run(flagName, func(t *testing.T) {
+			var out, problems strings.Builder
+			n, err := run([]string{flagName}, &out, &problems)
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("run(%s) error = %v, want flag.ErrHelp", flagName, err)
+			}
+			if n != 0 {
+				t.Errorf("run(%s) counted %d findings, want 0", flagName, n)
+			}
+			for _, want := range []string{"usage: doccheck [packages...]", "header comment", "Exit status:", "\n  2  "} {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("usage on stdout lacks %q:\n%s", want, out.String())
+				}
+			}
+			if problems.Len() != 0 {
+				t.Errorf("help wrote to stderr: %q", problems.String())
+			}
+			if code := exitStatus(n, err); code != 0 {
+				t.Errorf("exit status for help = %d, want 0", code)
+			}
+		})
+	}
+}
+
+func TestRunRejectsAnUnknownFlag(t *testing.T) {
+	var out, problems strings.Builder
+	n, err := run([]string{"-x", "./..."}, &out, &problems)
+	var usageErr usageError
+	if !errors.As(err, &usageErr) {
+		t.Fatalf("run(-x) error = %v, want a usageError", err)
+	}
+	if !strings.Contains(err.Error(), "-x") || !strings.Contains(err.Error(), "doccheck -h") {
+		t.Errorf("error = %q, want it to name the flag and point at -h", err)
+	}
+	if n != 0 || out.Len() != 0 || problems.Len() != 0 {
+		t.Errorf("an unknown flag ran the checker: n=%d out=%q problems=%q", n, out.String(), problems.String())
+	}
+	if code := exitStatus(n, err); code != exitUsage {
+		t.Errorf("exit status for an unknown flag = %d, want %d", code, exitUsage)
+	}
+}
+
+func TestExitStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		n    int
+		err  error
+		want int
+	}{
+		{"clean", 0, nil, 0},
+		{"findings", 3, nil, exitFailure},
+		{"walk error", 0, errors.New("walking nope: no such file"), exitFailure},
+		{"help", 0, flag.ErrHelp, 0},
+		{"usage", 0, usageError{err: errors.New("flag provided but not defined: -x")}, exitUsage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := exitStatus(tc.n, tc.err); got != tc.want {
+				t.Errorf("exitStatus(%d, %v) = %d, want %d", tc.n, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseArgsPatterns(t *testing.T) {
+	patterns, err := parseArgs(nil, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs(nil): %v", err)
+	}
+	if len(patterns) != 1 || patterns[0] != "./..." {
+		t.Errorf("parseArgs(nil) = %v, want [./...]", patterns)
+	}
+	patterns, err = parseArgs([]string{"--", "-h"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseArgs(--, -h): %v", err)
+	}
+	if len(patterns) != 1 || patterns[0] != "-h" {
+		t.Errorf("parseArgs(--, -h) = %v, want the -h after -- kept as a pattern", patterns)
 	}
 }
 

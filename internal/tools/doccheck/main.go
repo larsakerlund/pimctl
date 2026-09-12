@@ -1,10 +1,13 @@
-// Finding the files and reporting on them: argument handling, the directory
-// walk, parsing, the one whole-package rule (a single package comment), and the
-// exit code. The rules that judge a file live in check.go.
+// Finding the files and reporting on them: the command line and its usage
+// text, the directory walk, parsing, the one whole-package rule (a single
+// package comment), and the exit code. The rules that judge a file live in
+// check.go.
 
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -17,35 +20,110 @@ import (
 	"strings"
 )
 
-// exitFailure is the status returned when anything is undocumented. Any finding
-// is a failure: the gate exists so a gap cannot be merged and argued about
-// later, and a warning nobody has to act on would not do that.
-const exitFailure = 1
+// The exit statuses, one per way a run can end. They are distinct so a Makefile
+// or a script can tell "the code is undocumented" from "the command line was
+// wrong" — the second is a defect in the caller, and repeating the run will not
+// change it.
+const (
+	// exitFailure is the status when anything is undocumented, or when a
+	// package cannot be walked or parsed. Any finding is a failure: the gate
+	// exists so a gap cannot be merged and argued about later, and a warning
+	// nobody has to act on would not do that.
+	exitFailure = 1
+	// exitUsage is the status for a flag the checker does not know, the value
+	// the flag package and the go command use for the same thing.
+	exitUsage = 2
+)
+
+// usage is what -h prints: the rules the checker applies, how packages are
+// named, and what each exit status means. It lives next to the code that
+// applies the exit statuses so the text and the numbers change together.
+const usage = `usage: doccheck [packages...]
+
+doccheck is the documentation gate ` + "`make doccheck`" + ` runs. It parses every
+non-generated Go file in the named packages and reports:
+
+  - a file with no header comment above its package clause;
+  - a top-level declaration, exported or not, with no doc comment
+    (test files are held to the header rule only);
+  - a doc comment that does not start with the name it documents, says
+    nothing beyond that name, or does not end in a full stop;
+  - a struct field or interface method with no comment, in non-test files;
+  - a package with more than one package comment.
+
+Packages are directories, with or without a trailing /... for "and everything
+below"; the default is ./... from the working directory. Findings go to stderr
+as file:line:col: message, one per line, and a one-line summary goes to stdout.
+
+Exit status:
+  0  every file examined is documented
+  1  at least one finding, or a package that cannot be walked or parsed
+  2  a flag doccheck does not know
+`
+
+// usageError marks a command line the checker could not parse — a flag it does
+// not know — so main can exit with exitUsage rather than exitFailure. It wraps
+// the flag package's own error, whose wording names the offending flag.
+type usageError struct {
+	err error // the flag package's error, e.g. "flag provided but not defined: -x".
+}
+
+// Error reports the flag package's message and where to find the usage text.
+func (e usageError) Error() string {
+	return e.err.Error() + " (run doccheck -h for usage)"
+}
+
+// Unwrap exposes the flag package's error to errors.Is and errors.As.
+func (e usageError) Unwrap() error {
+	return e.err
+}
 
 // main runs the checker over the packages named on the command line, or over
-// `./...` when none are named, and exits non-zero if anything is undocumented.
+// `./...` when none are named, and exits with the exitStatus of the result: 0
+// when everything is documented or -h was asked for, exitFailure when anything
+// is undocumented or unreadable, exitUsage for a flag it does not know.
 func main() {
 	n, err := run(os.Args[1:], os.Stdout, os.Stderr)
-	if err != nil {
+	if err != nil && !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintf(os.Stderr, "doccheck: %v\n", err)
-		os.Exit(exitFailure)
 	}
-	if n > 0 {
-		os.Exit(exitFailure)
+	if code := exitStatus(n, err); code != 0 {
+		os.Exit(code)
 	}
 }
 
-// run checks the given package patterns and returns how many findings it
-// printed.
+// exitStatus maps a run's result to the process exit status: 0 for a clean run
+// or a request for help (the usage text has already been printed), exitUsage
+// for a usageError, exitFailure for any other error or for n > 0 findings.
+func exitStatus(n int, err error) int {
+	var usageErr usageError
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return 0
+	case errors.As(err, &usageErr):
+		return exitUsage
+	case err != nil, n > 0:
+		return exitFailure
+	default:
+		return 0
+	}
+}
+
+// run parses the command line, checks the packages it names and returns how
+// many findings it printed.
 //
-// Patterns are directories, with or without a trailing `/...` for "and
-// everything below". An empty list means `./...`. Findings go to problems, one
-// per line, sorted by file and position; a one-line summary goes to out. The
-// error result is reserved for a pattern that cannot be walked or a file that
-// cannot be parsed — a defect in the checker's input, not in the documentation.
-func run(patterns []string, out, problems io.Writer) (int, error) {
-	if len(patterns) == 0 {
-		patterns = []string{"./..."}
+// args is the command line without the program name: flags first, then
+// package patterns. Patterns are directories, with or without a trailing
+// `/...` for "and everything below"; none means `./...`. Findings go to
+// problems, one per line, sorted by file and position; a one-line summary goes
+// to out. The error result is flag.ErrHelp after the usage text has been
+// written to out, a usageError for a flag it does not know, or an error for a
+// pattern that cannot be walked or a file that cannot be parsed — a defect in
+// the checker's input, not in the documentation.
+func run(args []string, out, problems io.Writer) (int, error) {
+	patterns, err := parseArgs(args, out)
+	if err != nil {
+		return 0, err
 	}
 	paths, err := goFiles(patterns)
 	if err != nil {
@@ -64,6 +142,32 @@ func run(patterns []string, out, problems io.Writer) (int, error) {
 	}
 	fmt.Fprintf(out, "doccheck: %d file(s) documented\n", files)
 	return 0, nil
+}
+
+// parseArgs separates flags from package patterns and returns the patterns,
+// defaulting to `./...` when none are given.
+//
+// The only flags are the flag package's own -h, -help and --help, which write
+// usage to out and return flag.ErrHelp. Any other flag is a usageError. The
+// flag package's own usage printing is switched off because it writes both
+// cases to one stream, and help belongs on stdout while an error belongs on
+// stderr.
+func parseArgs(args []string, out io.Writer) ([]string, error) {
+	flags := flag.NewFlagSet("doccheck", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.Usage = func() {}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(out, usage)
+			return nil, err
+		}
+		return nil, usageError{err: err}
+	}
+	patterns := flags.Args()
+	if len(patterns) == 0 {
+		patterns = []string{"./..."}
+	}
+	return patterns, nil
 }
 
 // checkFiles parses and checks a set of files, returning the findings in source
