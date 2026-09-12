@@ -93,10 +93,19 @@ func NormalizeScopeType(armType, scopeID string) string {
 // neither has a fixed length to turn into a [time.Duration].
 var isoDurationRE = regexp.MustCompile(`^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$`)
 
+// MaxISODuration bounds what [ParseISODuration] accepts, in total and per
+// component. A PIM activation window is at most 24 hours and a permanent
+// eligibility is expressed without a duration at all, so a thousand days is
+// beyond any value a policy or a user can mean; the bound exists because a
+// component large enough to wrap a [time.Duration] when multiplied by its unit
+// would otherwise parse into a nonsense window instead of an error.
+const MaxISODuration = 1000 * 24 * time.Hour
+
 // ParseISODuration parses the ISO-8601 durations PIM policies use for
 // maximumDuration — PT1H, PT4H, PT1H30M, PT30M, P1D. Years and months are not
 // accepted because activation windows never use them and their length is
-// ambiguous.
+// ambiguous. It returns an error for an empty or malformed string, and for
+// any component or total beyond [MaxISODuration].
 func ParseISODuration(s string) (time.Duration, error) {
 	s = strings.TrimSpace(strings.ToUpper(s))
 	if s == "" {
@@ -117,13 +126,25 @@ func ParseISODuration(s string) (time.Duration, error) {
 		if m[i+1] == "" {
 			continue
 		}
-		n, err := strconv.Atoi(m[i+1])
-		if err != nil {
-			return 0, fmt.Errorf("%q has a non-numeric component: %w", s, err)
+		n, err := strconv.ParseInt(m[i+1], 10, 64)
+		// The bound is checked on the count, before the multiply, so a value
+		// that would wrap the product is caught by the same comparison as one
+		// that merely exceeds the limit.
+		if err != nil || n > int64(MaxISODuration/unit) {
+			return 0, errTooLong(s)
 		}
 		d += time.Duration(n) * unit
 	}
+	if d > MaxISODuration {
+		return 0, errTooLong(s)
+	}
 	return d, nil
+}
+
+// errTooLong is the error for a duration beyond [MaxISODuration], quoting the
+// input and the bound in days, which is the unit the bound is stated in.
+func errTooLong(s string) error {
+	return fmt.Errorf("%q is longer than the %d days pimctl accepts", s, MaxISODuration/(24*time.Hour))
 }
 
 // FormatISODuration renders a duration in the PT#H#M#S form ARM expects.
@@ -148,13 +169,17 @@ func FormatISODuration(d time.Duration) string {
 	return out
 }
 
-// TruncateMiddle shortens a string for table display, keeping both ends.
+// TruncateMiddle shortens a string to width runes for table display, keeping
+// both ends around a single "…". It counts and cuts in runes, not bytes: a
+// role or scope name with an "å" or an emoji in it cut on a byte boundary
+// would leave half a code point in the table.
 func TruncateMiddle(s string, width int) string {
-	if width <= 3 || len(s) <= width {
+	r := []rune(s)
+	if width <= 3 || len(r) <= width {
 		return s
 	}
 	keep := width - 1
 	head := keep / 2
 	tail := keep - head
-	return s[:head] + "…" + s[len(s)-tail:]
+	return string(r[:head]) + "…" + string(r[len(r)-tail:])
 }
