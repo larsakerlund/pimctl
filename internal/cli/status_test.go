@@ -391,6 +391,66 @@ func TestStatusJSONCarriesKeysAndUntil(t *testing.T) {
 	}
 }
 
+// TestInteractiveStatusPrintsRecordThenCorrection drives the interactive path
+// end to end: on a terminal `status` prints this machine's record straight
+// away, confirms against Azure behind a spinner, and then names the difference.
+// Here the record holds one role and Azure lists that role plus one activated
+// elsewhere, so the table comes first and the correction after it, naming the
+// extra role — and nothing is ever said as if the record were the last word.
+func TestInteractiveStatusPrintsRecordThenCorrection(t *testing.T) {
+	elig, held, entry := lagFixtures(t)
+	elsewhere := armclient.Assignment{ID: "/instances/owner-prod"}
+	elsewhere.Properties.AssignmentType = "Activated"
+	elsewhere.Properties.Scope = lagScope
+	elsewhere.Properties.RoleDefinitionID = lagScope + "/providers/Microsoft.Authorization/roleDefinitions/8e3af657"
+	elsewhere.Properties.ExpandedProperties.RoleDefinition = armclient.Named{DisplayName: "Owner"}
+	elsewhere.Properties.ExpandedProperties.Scope = armclient.Named{
+		DisplayName: "Contoso landing zones", Type: "managementgroup", ID: lagScope,
+	}
+	f := &fakeARM{
+		t: t, eligibilities: []armclient.Eligibility{elig},
+		activated: []armclient.Assignment{held, elsewhere},
+	}
+	f.install()
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
+
+	out, err := runCmdOn(t, ttyOn(false, true, false), "status", "-c", "contoso")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+
+	table := strings.Index(out, "Cost Management Contributor")
+	correction := strings.Index(out, "activated elsewhere")
+	if table < 0 {
+		t.Fatalf("the record's own row never printed:\n%s", out)
+	}
+	if correction < 0 {
+		t.Fatalf("the correction never named the role Azure knew about:\n%s", out)
+	}
+	if table > correction {
+		t.Errorf("the record table must print before the correction, not after it:\n%s", out)
+	}
+	// The row from the record is a guess until Azure answers, and the table
+	// says so; the correction then reports exactly the one row it did not know.
+	if !strings.Contains(out[:correction], "?") && !strings.Contains(out[:correction], "~") {
+		t.Errorf("the instant table must mark its rows unconfirmed:\n%s", out)
+	}
+	want := "confirmed 1 against Azure, +1 activated elsewhere: Owner @ Contoso landing zones (contoso-prod)"
+	if !strings.Contains(out, want) {
+		t.Errorf("output is missing %q:\n%s", want, out)
+	}
+	if !strings.Contains(out, "run `pimctl status` again for the corrected table") {
+		t.Errorf("a correction must tell the reader how to see the corrected table:\n%s", out)
+	}
+	if strings.Contains(out, "no longer held") {
+		t.Errorf("a role Azure still lists must not be reported as lost:\n%s", out)
+	}
+	// Owner is listed, so the fake heard every scope: nothing is unconfirmed.
+	if strings.Contains(out, "ARM did not answer") {
+		t.Errorf("no scope stalled, so none may be reported unread:\n%s", out)
+	}
+}
+
 // deltaRow builds one activation row for the delta tests.
 func deltaRow(role, leaf string) activeRow {
 	scope := "/providers/Microsoft.Management/managementGroups/" + leaf

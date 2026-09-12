@@ -143,12 +143,8 @@ func onEachResult(stream func(result)) func(result) {
 	}
 }
 
-// streamProgress returns a per-role reporter for a terminal, and nil otherwise.
-// Streaming to a pipe would interleave with the table that follows and give a
-// parser two representations of the same run.
-//
-// Each line is printed with the spinner paused, so a completed role does not
-// land in the middle of the spinner's own line.
+// streamProgress is [streamProgressWith] asked of the process's own streams,
+// for a caller that carries no [deps].
 func streamProgress(
 	cmd *cobra.Command,
 	g *globalOpts,
@@ -156,7 +152,24 @@ func streamProgress(
 	sp *term.Spinner,
 	scopes scopeLabeler,
 ) func(result) {
-	if g.json() || !term.StderrIsTTY() {
+	return streamProgressWith(cmd, g, defaultTTY(), roles, sp, scopes)
+}
+
+// streamProgressWith returns a per-role reporter when tty says stderr is a
+// terminal, and nil otherwise. Streaming to a pipe would interleave with the
+// table that follows and give a parser two representations of the same run.
+//
+// Each line is printed with the spinner paused, so a completed role does not
+// land in the middle of the spinner's own line.
+func streamProgressWith(
+	cmd *cobra.Command,
+	g *globalOpts,
+	tty ttyProbe,
+	roles int,
+	sp *term.Spinner,
+	scopes scopeLabeler,
+) func(result) {
+	if g.json() || !tty.stderrIsTTY() {
 		return nil
 	}
 	w := cmd.ErrOrStderr()
@@ -194,14 +207,20 @@ func streamResult(w io.Writer, pal term.Palette, scopes scopeLabeler, r result) 
 		renderOutcome(pal, r.Outcome), r.Role, scopes.Label(r.ScopeName, r.Scope), until, detail)
 }
 
-// streamedTo reports whether the reader has already seen every row go past on
-// this same screen.
+// streamedTo is [streamedToWith] asked of the process's own streams, for a
+// caller that carries no [deps].
+func streamedTo(stream func(result)) bool {
+	return streamedToWith(stream, defaultTTY())
+}
+
+// streamedToWith reports whether the reader has already seen every row go past
+// on this same screen.
 //
 // Both halves matter: stream is nil when nothing was streamed, and stdout being
 // redirected means the streamed lines went to a terminal while the table is
 // going to a file, which still wants the full table in it.
-func streamedTo(stream func(result)) bool {
-	return stream != nil && term.StdoutIsTTY()
+func streamedToWith(stream func(result), tty ttyProbe) bool {
+	return stream != nil && tty.stdoutIsTTY()
 }
 
 // withScopeLabels fills each result's ScopeLabel from the run's labeler.
