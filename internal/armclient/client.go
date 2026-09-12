@@ -353,9 +353,16 @@ type policyAssignmentList struct {
 	// scope, so only the first entry is read.
 	Value []struct {
 		Properties struct {
-			PolicyID         string `json:"policyId"`         // the policy document to fetch next.
+			PolicyID         string `json:"policyId"`         // the policy document, fetched only when EffectiveRules is empty.
 			RoleDefinitionID string `json:"roleDefinitionId"` // the role the policy applies to.
 			Scope            string `json:"scope"`            // the scope it applies at.
+			// EffectiveRules is the rule set ARM computed for this assignment,
+			// the same heterogeneous array the policy document carries under
+			// properties.rules. When it is present the policy document adds
+			// nothing: on the tenant this was measured against, every end-user
+			// rule pimctl reads was byte-identical in both, so reading it here
+			// saves the second GET of every policy lookup.
+			EffectiveRules []json.RawMessage `json:"effectiveRules"`
 		} `json:"properties"` // the only part of an assignment pimctl reads.
 	} `json:"value"`
 }
@@ -426,15 +433,21 @@ func (c *Client) GetRoleSettings(ctx context.Context, scope, roleDefinitionID st
 		)
 	}
 
-	praw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s%s?api-version=%s", c.Host, policyID, APIVersion), nil)
+	// The listing's effectiveRules answer the question; the document is the
+	// fallback for a listing that omits them or carries a set the parser
+	// cannot use, where the document is authoritative and a second GET is
+	// cheaper than a wrong answer.
+	settings, err := parseRules(policyID, pal.Value[0].Properties.EffectiveRules)
 	if err != nil {
-		return nil, err
+		praw, getErr := c.do(ctx, http.MethodGet, fmt.Sprintf("%s%s?api-version=%s", c.Host, policyID, APIVersion), nil)
+		if getErr != nil {
+			return nil, getErr
+		}
+		if settings, err = ParsePolicy(praw); err != nil {
+			return nil, err
+		}
+		settings.PolicyID = policyID
 	}
-	settings, err := ParsePolicy(praw)
-	if err != nil {
-		return nil, err
-	}
-	settings.PolicyID = policyID
 
 	c.policyMu.Lock()
 	c.policyCache[key] = settings
@@ -449,8 +462,19 @@ func ParsePolicy(raw []byte) (*RoleSettings, error) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("could not parse the role management policy: %w", err)
 	}
-	s := &RoleSettings{PolicyID: doc.ID}
-	for _, rr := range doc.Properties.Rules {
+	return parseRules(doc.ID, doc.Properties.Rules)
+}
+
+// parseRules reads the four end-user rules pimctl acts on out of a rule array,
+// whether it came from a policy document or from an assignment's
+// effectiveRules; the array has the same shape in both. policyID is recorded
+// on the result so a cached entry can be traced to its ARM document. It
+// returns an error when the array has no Expiration_EndUser_Assignment rule
+// with a maximumDuration, or when a rule it acts on does not decode, because a
+// policy without a maximum is not one an activation can be planned against.
+func parseRules(policyID string, rules []json.RawMessage) (*RoleSettings, error) {
+	s := &RoleSettings{PolicyID: policyID}
+	for _, rr := range rules {
 		var h ruleHeader
 		if err := json.Unmarshal(rr, &h); err != nil {
 			continue

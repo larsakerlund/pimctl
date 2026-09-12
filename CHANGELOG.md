@@ -62,6 +62,9 @@ inside a context window.
   contexts concurrently; a named `down` sends its requests before the
   activation listing has answered and widens to the listing afterwards.
 - The picker follows the terminal height on resize.
+- A policy lookup reads the rules from the policy-assignment listing's
+  `effectiveRules` and fetches the policy document only when they are absent,
+  which halves the cold cost of planning each role.
 - Releases carry build provenance attestations; the release build verifies the
   module graph instead of tidying it; CI fails on an untidy `go.mod`.
 - An issue template, `.gitattributes`, `doccheck -h`, and `make clean` removes

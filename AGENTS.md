@@ -74,7 +74,9 @@ Measured on a 25-scope tenant, so do not re-derive these by guessing:
 
 - The per-scope activation fan-out is the expensive call (~1.6 s p50 each,
   ~2.4 s wall at full concurrency). Never put it on the path to first output.
-- Token mint is ~1.2 s, eligibility ~0.7 s, a policy read ~1.2 s per role.
+- Token mint is ~1.2 s, eligibility ~0.7 s, a policy read ~1.2 s per role when
+  it needs both GETs; the assignment listing's `effectiveRules` normally make
+  it one.
   All three are cached; a warm command should do no network before printing.
 - HTTP/2 and connection reuse are already optimal, and process startup is
   0.02 s. There is nothing to win there — measure before optimising.

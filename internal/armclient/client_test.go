@@ -242,6 +242,11 @@ func TestGetRoleSettingsParsesRealPolicy(t *testing.T) {
 		t.Fatalf("GetRoleSettings: %v", err)
 	}
 	assertPolicyFixture(t, s)
+	// The fixture is shaped like ARM's listing, which carries effectiveRules,
+	// so the policy document itself is never fetched.
+	if calls.Load() != 1 {
+		t.Errorf("policy lookup made %d call(s), want 1: effectiveRules should have answered it", calls.Load())
+	}
 
 	// A second lookup for the same (scope, role) must be served from cache.
 	before := calls.Load()
@@ -978,5 +983,53 @@ func TestPollPreservesCallerCancellation(t *testing.T) {
 	got, err := c.Poll(ctx, sr, time.Second)
 	if got != sr || !errors.Is(err, context.Canceled) {
 		t.Fatalf("caller cancellation became normal timeout: %v", err)
+	}
+}
+
+// TestGetRoleSettingsFallsBackToThePolicyDocument: a listing without
+// effectiveRules — an older ARM shape, or a tenant that omits them — is
+// answered by the second GET, and yields the same settings.
+func TestGetRoleSettingsFallsBackToThePolicyDocument(t *testing.T) {
+	var docReads atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assertPinnedAPIVersion(t, r)
+		switch {
+		case strings.Contains(r.URL.Path, "roleManagementPolicyAssignments"):
+			var listing struct {
+				Value []struct {
+					Properties map[string]json.RawMessage `json:"properties"`
+				} `json:"value"`
+			}
+			if err := json.Unmarshal(readTestdata(t, "policy_assignment.json"), &listing); err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range listing.Value {
+				delete(v.Properties, "effectiveRules")
+			}
+			stripped, err := json.Marshal(listing)
+			if err != nil {
+				t.Fatal(err)
+			}
+			respond(t, w, stripped)
+		case strings.Contains(r.URL.Path, "roleManagementPolicies"):
+			docReads.Add(1)
+			respond(t, w, readTestdata(t, "policy.json"))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+
+	scope := "/providers/Microsoft.Management/managementGroups/contoso-prod"
+	roleDef := "/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c"
+	s, err := c.GetRoleSettings(context.Background(), scope, roleDef)
+	if err != nil {
+		t.Fatalf("GetRoleSettings: %v", err)
+	}
+	assertPolicyFixture(t, s)
+	if docReads.Load() != 1 {
+		t.Errorf(
+			"policy document read %d time(s), want exactly 1 when the listing has no effectiveRules",
+			docReads.Load(),
+		)
 	}
 }
