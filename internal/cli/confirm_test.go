@@ -36,7 +36,7 @@ func TestConfirmationOnlyForBroadUnattendedRuns(t *testing.T) {
 }
 
 // TestConfirmPlanAsksOnlyForAllOrMoreThanTenRoles pins the documented rule
-// through confirmPlan itself: an unattended --all, or more than ten roles, is
+// through confirmPlanWith itself: an unattended --all, or more than ten roles, is
 // put to the user; anything smaller, anything with -y, and anything picked by
 // hand goes ahead with the plan printed and no question asked. Whether a
 // question was asked is observed the one way a unit test can: with stdin off a

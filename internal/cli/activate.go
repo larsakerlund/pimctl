@@ -151,20 +151,21 @@ is reported per role.`,
 
 // checkActivateFlags rejects, before any network call, the flag combinations
 // that cannot work — so `pimctl up < /dev/null` says it needs a terminal
-// without first paying for a token and a listing.
-func checkActivateFlags(o *activateOpts) error {
+// without first paying for a token and a listing. tty is what answers whether
+// there is a terminal to pick, confirm and justify on.
+func checkActivateFlags(o *activateOpts, tty ttyProbe) error {
 	if err := checkSelectionFlags(o.all, o.preset, o.roles, o.scopes, o.keys); err != nil {
 		return err
 	}
 	hasSelection := o.requirements != nil || o.all || o.preset != "" || len(o.roles) > 0 || len(o.scopes) > 0 ||
 		len(o.keys) > 0
-	if !hasSelection && !term.StdinIsTTY() {
+	if !hasSelection && !tty.stdinIsTTY() {
 		return errNoTTY("role selection")
 	}
-	if !o.yes && !term.StdinIsTTY() {
+	if !o.yes && !tty.stdinIsTTY() {
 		return errNoConfirmTTY
 	}
-	if !term.StdinIsTTY() && strings.TrimSpace(o.justification) == "" {
+	if !tty.stdinIsTTY() && strings.TrimSpace(o.justification) == "" {
 		return errors.New("-j/--justification is required when not running interactively.\n" +
 			"The justification is written to the PIM audit log, so pimctl will not silently reuse the last one you typed")
 	}
@@ -187,7 +188,7 @@ func checkActivateFlags(o *activateOpts) error {
 // that is waiting on an approver, is carried out through [reportRun] as an exit
 // code instead.
 func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) error {
-	requested, err := prepareActivation(cmd, opts, o)
+	requested, err := prepareActivation(cmd, opts, d.tty, o)
 	if err != nil {
 		return err
 	}
@@ -205,13 +206,13 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 	}
 	defer rc.finish(cmd)
 	if o.requirements != nil {
-		return runProjectActivation(cmd, rc, o, requested)
+		return runProjectActivation(cmd, rc, d.tty, o, requested)
 	}
 	rows, listErrs, future := readActivationEligibility(cmd, rc, o, presetEntries)
 	failures := slices.Concat(rc.Failures, listErrs)
 	reportContextFailures(cmd.ErrOrStderr(), failures)
 
-	selected, interactive, err := chooseRows(cmd, rc, rows, o, presetEntries)
+	selected, interactive, err := chooseRows(cmd, rc, d.tty, rows, o, presetEntries)
 	if err != nil {
 		return err
 	}
@@ -228,7 +229,7 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 	if future == nil {
 		future = startActivationListing(rc.Ctx, rc, targetScopes(selected))
 	}
-	return finishActivation(cmd, rc, o, requested, rows, selected, interactive, future, failures)
+	return finishActivation(cmd, rc, d.tty, o, requested, rows, selected, interactive, future, failures)
 }
 
 // finishActivation plans and submits a resolved selection through the shared
@@ -239,8 +240,9 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 // the selection; they make the run incomplete and so exit 1. The activation
 // listing behind future is not in that set: it is advisory to `up`, which ends
 // on ARM's answer to each request, so a scope it could not read is noted after
-// the results and never changes the exit code.
-func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, requested time.Duration,
+// the results and never changes the exit code. tty decides what may be asked
+// and streamed: a justification prompt, the confirmation, the per-role lines.
+func finishActivation(cmd *cobra.Command, rc *runContext, tty ttyProbe, o *activateOpts, requested time.Duration,
 	rows, selected []row, interactive bool, future *activeFuture, failures []error,
 ) error {
 	ctx, opts := rc.Ctx, rc.Opts
@@ -262,7 +264,7 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 			return err
 		}
 	}
-	justification, err := resolveJustification(o.justification, interactive || o.requirements != nil, plan)
+	justification, err := resolveJustification(o.justification, interactive || o.requirements != nil, tty, plan)
 	if err != nil {
 		return err
 	}
@@ -273,7 +275,7 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 	// still says *which* "Contoso landing zones" is about to be elevated.
 	scopes := scopeLabelerForRows(rows)
 
-	proceed, err := confirmPlan(cmd, opts, confirmOpts{
+	proceed, err := confirmPlanWith(cmd, opts, tty, confirmOpts{
 		Yes:         o.yes,
 		Interactive: interactive,
 		All:         o.all,
@@ -289,7 +291,7 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 
 	// Activation is as slow as Azure is; it must not look dead while it runs.
 	sp := term.NewSpinner(cmd.ErrOrStderr(), fmt.Sprintf("activating %s…", roleCount(len(plan))))
-	stream := streamProgress(cmd, opts, len(plan), sp, scopes)
+	stream := streamProgressWith(cmd, opts, tty, len(plan), sp, scopes)
 	results := executeActivations(
 		ctx, plan, justification, o.ticketNumber, o.ticketSystem, o.noWait, rc.Timeouts.poll,
 		onEachResult(stream),
@@ -307,7 +309,7 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 	// Requests have already been sent to ARM, so nothing below may return early
 	// — the user must always see which roles activated and the right exit code.
 	rememberActivateRun(cmd, activationJustification(plan, justification), o.savePreset, selected)
-	runErr := reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
+	runErr := reportRun(cmd, opts, results, failures, multi, streamedToWith(stream, tty), scopes)
 	// The listing may have landed while the requests were in flight; what it
 	// says about scopes it could not read belongs under the table, as a caveat
 	// on the dimming and the UNTIL column, not in the exit code.
@@ -317,10 +319,12 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 }
 
 // chooseRows narrows the eligible roles down to what the user asked for, and
-// says so plainly when there is nothing to work with.
+// says so plainly when there is nothing to work with. tty is what decides
+// whether the picker may be shown, and is passed on to [selectRows].
 func chooseRows(
 	cmd *cobra.Command,
 	rc *runContext,
+	tty ttyProbe,
 	rows []row,
 	o *activateOpts,
 	presetEntries []config.PresetEntry,
@@ -328,7 +332,7 @@ func chooseRows(
 	if len(rows) == 0 {
 		return nil, false, errors.New("you have no eligible Azure resource roles in the selected context(s)")
 	}
-	selected, interactive, err = selectRows(cmd, rc, rows, o, presetEntries)
+	selected, interactive, err = selectRows(cmd, rc, tty, rows, o, presetEntries)
 	if err != nil {
 		return nil, false, err
 	}
@@ -344,10 +348,12 @@ func chooseRows(
 const maxNonInteractive = 10
 
 // selectRows resolves the selection flags, falling back to the interactive
-// multi-select when none were given.
+// multi-select when none were given; tty is the probe that multi-select
+// reports its summary line through.
 func selectRows(
 	cmd *cobra.Command,
 	rc *runContext,
+	tty ttyProbe,
 	rows []row,
 	o *activateOpts,
 	presetEntries []config.PresetEntry,
@@ -385,7 +391,7 @@ func selectRows(
 	// The dimming comes from the local record, which is available immediately.
 	// The ARM fan-out lands seconds after the picker paints, so a picker fed
 	// from it would show the marks after the user had already chosen.
-	sel, err := selectInteractive(applyLocalRecord(rows, rc), multipleContexts(rows), scopeLabelerForRows(rows))
+	sel, err := selectInteractive(applyLocalRecord(rows, rc), multipleContexts(rows), scopeLabelerForRows(rows), tty)
 	return sel, true, err
 }
 
@@ -526,8 +532,15 @@ func savePreset(name string, rows []row) error {
 }
 
 // prepareActivation validates local selection and duration before opening any
-// login. Automatic project discovery is resolved before terminal requirements.
-func prepareActivation(cmd *cobra.Command, opts *globalOpts, o *activateOpts) (time.Duration, error) {
+// login. Automatic project discovery is resolved before terminal requirements,
+// which tty answers. It returns the requested activation length, zero when a
+// flag, the duration or the absent terminal makes the run impossible.
+func prepareActivation(
+	cmd *cobra.Command,
+	opts *globalOpts,
+	tty ttyProbe,
+	o *activateOpts,
+) (time.Duration, error) {
 	if err := validateFlags(opts); err != nil {
 		return 0, err
 	}
@@ -538,7 +551,7 @@ func prepareActivation(cmd *cobra.Command, opts *globalOpts, o *activateOpts) (t
 	if err != nil {
 		return 0, err
 	}
-	if flagErr := checkActivateFlags(o); flagErr != nil {
+	if flagErr := checkActivateFlags(o, tty); flagErr != nil {
 		return 0, flagErr
 	}
 	return requested, nil

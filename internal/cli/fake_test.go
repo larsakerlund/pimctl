@@ -549,9 +549,15 @@ func installTimeouts(t *testing.T, tm timeouts) {
 	t.Cleanup(func() { fakeTimeouts = prev })
 }
 
-// testDeps is defaultDeps with whatever the test installed.
+// testDeps is defaultDeps with whatever the test installed. The terminal probe
+// is one of the pinned answers rather than the process's own streams, because
+// how the suite was started is not something a test controls: a tree that
+// asked the host would take the interactive branch on one machine and the
+// unattended one on another. [runCmdOn] substitutes the interactive answer
+// where a test wants one.
 func testDeps() deps {
 	d := defaultDeps()
+	d.tty = noTTY()
 	if fakeOpener != nil {
 		d.openSessions = fakeOpener
 	}

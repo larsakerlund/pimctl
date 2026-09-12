@@ -143,18 +143,6 @@ func onEachResult(stream func(result)) func(result) {
 	}
 }
 
-// streamProgress is [streamProgressWith] asked of the process's own streams,
-// for a caller that carries no [deps].
-func streamProgress(
-	cmd *cobra.Command,
-	g *globalOpts,
-	roles int,
-	sp *term.Spinner,
-	scopes scopeLabeler,
-) func(result) {
-	return streamProgressWith(cmd, g, defaultTTY(), roles, sp, scopes)
-}
-
 // streamProgressWith returns a per-role reporter when tty says stderr is a
 // terminal, and nil otherwise. Streaming to a pipe would interleave with the
 // table that follows and give a parser two representations of the same run.
@@ -205,12 +193,6 @@ func streamResult(w io.Writer, pal term.Palette, scopes scopeLabeler, r result) 
 	}
 	fmt.Fprintf(w, "%s  %s @ %s%s%s\n",
 		renderOutcome(pal, r.Outcome), r.Role, scopes.Label(r.ScopeName, r.Scope), until, detail)
-}
-
-// streamedTo is [streamedToWith] asked of the process's own streams, for a
-// caller that carries no [deps].
-func streamedTo(stream func(result)) bool {
-	return streamedToWith(stream, defaultTTY())
 }
 
 // streamedToWith reports whether the reader has already seen every row go past

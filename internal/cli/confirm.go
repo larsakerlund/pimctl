@@ -96,17 +96,6 @@ func (o confirmOpts) NeedsConfirmation() bool {
 	return o.All || o.Roles > confirmBulkThreshold
 }
 
-// confirmPlan is [confirmPlanWith] asked of the process's own streams, for a
-// caller that carries no [deps].
-func confirmPlan(
-	cmd *cobra.Command,
-	g *globalOpts,
-	opts confirmOpts,
-	printPlan func(io.Writer),
-) (bool, error) {
-	return confirmPlanWith(cmd, g, defaultTTY(), opts, printPlan)
-}
-
 // confirmPlanWith prints the plan and, when NeedsConfirmation says so, asks
 // before going ahead. A run that does not need confirming still prints the
 // plan, but only to a table run — under -o json it would corrupt the output.

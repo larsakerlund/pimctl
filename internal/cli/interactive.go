@@ -36,8 +36,9 @@ func runPicker(title string, items []picker.Item, height int) ([]int, error) {
 
 // selectInteractive shows a type-to-filter multi-select of every eligible role.
 // Already-active roles stay in the list but are dimmed, because re-activating
-// one to extend it is legitimate.
-func selectInteractive(rows []row, multiContext bool, scopes scopeLabeler) ([]row, error) {
+// one to extend it is legitimate. tty decides whether the summary line the
+// erased picker leaves behind is printed.
+func selectInteractive(rows []row, multiContext bool, scopes scopeLabeler, tty ttyProbe) ([]row, error) {
 	labels := itemLabels(rows, multiContext, scopes)
 	items := make([]picker.Item, 0, len(rows))
 	for i, r := range rows {
@@ -55,13 +56,15 @@ func selectInteractive(rows []row, multiContext bool, scopes scopeLabeler) ([]ro
 	for _, i := range picked {
 		out = append(out, rows[i])
 	}
-	reportSelection(len(out))
+	reportSelection(len(out), tty)
 	return out, nil
 }
 
-// reportSelection leaves the one line the erased picker owes to scrollback.
-func reportSelection(n int) {
-	if !term.StderrIsTTY() {
+// reportSelection leaves the one line the erased picker owes to scrollback,
+// and nothing at all when tty says stderr is not a terminal: the picker drew
+// on a screen nobody is reading, so there is no frame to summarise.
+func reportSelection(n int, tty ttyProbe) {
+	if !tty.stderrIsTTY() {
 		return
 	}
 	pal := term.PaletteFor(os.Stderr)
@@ -128,7 +131,9 @@ func pickerHaystack(r row, label string) string {
 	}, " "))
 }
 
-// selectInteractiveActive shows a multi-select of the roles currently activated.
+// selectInteractiveActive shows a multi-select of the roles currently
+// activated. Its summary line is reported against the process's own streams,
+// for a caller that carries no probe.
 func selectInteractiveActive(rows []activeRow, multiContext bool, scopes scopeLabeler) ([]activeRow, error) {
 	items := make([]picker.Item, 0, len(rows))
 	seen := map[string]int{}
@@ -159,7 +164,7 @@ func selectInteractiveActive(rows []activeRow, multiContext bool, scopes scopeLa
 	if err != nil {
 		return nil, err
 	}
-	reportSelection(len(picked))
+	reportSelection(len(picked), defaultTTY())
 	out := make([]activeRow, 0, len(picked))
 	for _, i := range picked {
 		out = append(out, rows[i])

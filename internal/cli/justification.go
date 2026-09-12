@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/larsakerlund/pimctl/internal/config"
-	"github.com/larsakerlund/pimctl/internal/term"
 )
 
 // justificationDemand counts how many of the selected roles have PIM's
@@ -36,17 +35,20 @@ func justificationDemand(plan []*planItem) (required, total int) {
 // prompt appears only when at least one selected role actually demands it. An
 // explicit -j always wins and never prompts.
 //
+// tty is what says whether the prompt can be drawn at all: without a terminal
+// on stdin there is nobody to ask, so the neutral default goes out.
+//
 // The remembered text is a prefill for that prompt and nothing more. Sending it
 // unasked put last week's sentence into this week's PIM audit log — a record
 // someone reads during an incident review, and one that said the wrong thing
 // with no one having typed it. When nobody is asked, the neutral default goes
 // out instead, which claims only what it can: that pimctl made the request.
-func resolveJustification(flag string, interactive bool, plan []*planItem) (string, error) {
+func resolveJustification(flag string, interactive bool, tty ttyProbe, plan []*planItem) (string, error) {
 	if flag != "" {
 		return flag, nil
 	}
 	required, total := justificationDemand(plan)
-	if !interactive || !term.StdinIsTTY() || required == 0 {
+	if !interactive || !tty.stdinIsTTY() || required == 0 {
 		return defaultJustification, nil
 	}
 

@@ -43,9 +43,10 @@ func TestJustificationDemand(t *testing.T) {
 func TestResolveJustificationSkipsThePromptWhenNoPolicyWantsOne(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	// Nothing stored, nothing required: the default goes out silently. If this
-	// tried to prompt it would block, since there is no terminal here.
-	got, err := resolveJustification("", true, planWithJustification(false, false))
+	// Nothing stored, nothing required: the default goes out silently. The
+	// probe says stdin is a terminal, so what keeps the prompt away here is the
+	// policy and nothing else.
+	got, err := resolveJustification("", true, ttyOn(true, true, true), planWithJustification(false, false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestResolveJustificationSkipsThePromptWhenNoPolicyWantsOne(t *testing.T) {
 	if saveErr := saveLastJustification("landing zone work"); saveErr != nil {
 		t.Fatal(saveErr)
 	}
-	got, err = resolveJustification("", true, planWithJustification(false))
+	got, err = resolveJustification("", true, ttyOn(true, true, true), planWithJustification(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +74,7 @@ func TestResolveJustificationSkipsThePromptWhenNoPolicyWantsOne(t *testing.T) {
 // even when a policy requires a justification.
 func TestResolveJustificationPrefersTheFlag(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	got, err := resolveJustification("INC-4711", true, planWithJustification(true, true))
+	got, err := resolveJustification("INC-4711", true, ttyOn(true, true, true), planWithJustification(true, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,7 @@ func TestResolveJustificationPrefersTheFlag(t *testing.T) {
 // reachable from the interactive flow.
 func TestResolveJustificationNonInteractiveNeverPrompts(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	got, err := resolveJustification("", false, planWithJustification(true, true))
+	got, err := resolveJustification("", false, ttyOn(true, true, true), planWithJustification(true, true))
 	if err != nil {
 		t.Fatal(err)
 	}

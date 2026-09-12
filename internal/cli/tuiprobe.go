@@ -78,7 +78,7 @@ func probeRows() []row {
 func ProbeSelect() error {
 	rows := probeRows()
 	fmt.Printf("PROBE_ROWS=%d\n", len(rows))
-	picked, err := selectInteractive(rows, false, scopeLabelerForRows(rows))
+	picked, err := selectInteractive(rows, false, scopeLabelerForRows(rows), defaultTTY())
 	if err != nil {
 		fmt.Printf("PROBE_ERROR=%v\n", err)
 		return err

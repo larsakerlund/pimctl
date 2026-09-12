@@ -12,7 +12,6 @@ import (
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/config"
-	"github.com/larsakerlund/pimctl/internal/term"
 )
 
 // initOpts selects the output and optional noninteractive source of requirements.
@@ -41,8 +40,9 @@ func newInitCmd(opts *globalOpts, d deps) *cobra.Command {
 	return cmd
 }
 
-// checkInit rejects invalid inputs and existing output before opening a login.
-func checkInit(o initOpts) error {
+// checkInit rejects invalid inputs and existing output before opening a login;
+// tty answers whether there is a terminal to choose scopes and roles on.
+func checkInit(o initOpts, tty ttyProbe) error {
 	if _, err := os.Lstat(o.file); err == nil {
 		return fmt.Errorf("%s already exists; edit it or choose a new --file", o.file)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -59,7 +59,7 @@ func checkInit(o initOpts) error {
 			return fmt.Errorf("--at: %w", err)
 		}
 	}
-	if !term.StdinIsTTY() && o.preset == "" && (len(o.at) == 0 || len(o.roles) == 0) {
+	if !tty.stdinIsTTY() && o.preset == "" && (len(o.at) == 0 || len(o.roles) == 0) {
 		return errors.New(
 			"init needs a terminal to choose scopes and roles; use --from-preset NAME or --at SCOPE --role NAME unattended",
 		)
@@ -73,7 +73,7 @@ func runInit(cmd *cobra.Command, opts *globalOpts, d deps, o initOpts) error {
 	if err := validateFlags(opts); err != nil {
 		return err
 	}
-	if err := checkInit(o); err != nil {
+	if err := checkInit(o, d.tty); err != nil {
 		return err
 	}
 	entries, err := presetSelection(o.preset, false)
@@ -106,7 +106,7 @@ func runInit(cmd *cobra.Command, opts *globalOpts, d deps, o initOpts) error {
 		}
 		p.Roles = projectRoles(rows)
 	} else {
-		rows, pickErr := initRows(cmd, rc, s, o)
+		rows, pickErr := initRows(cmd, rc, d.tty, s, o)
 		if pickErr != nil {
 			return pickErr
 		}
