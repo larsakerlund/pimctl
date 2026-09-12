@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -502,5 +503,174 @@ func TestDownKeyUsageNamesNoValue(t *testing.T) {
 	}
 	if strings.Contains(out, "--key pimctl list") || !strings.Contains(out, "--key stringArray") {
 		t.Errorf("--key usage:\n%s", out)
+	}
+}
+
+// TestNamedDownDoesNotWaitForTheListing: a named selection carries its own
+// scopes and role ids, so its requests go out on the eligibility rows and the
+// record alone. With every per-scope listing blocked for the whole run, the
+// command still finishes well inside the soft deadline the listing would
+// have cost it.
+func TestNamedDownDoesNotWaitForTheListing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"role", []string{"--role", "Cost Management Contributor"}},
+		{"preset", []string{"daily"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeARM{t: t, eligibilities: twoLowImpactRoles(), putStatus: "Revoked"}
+			f.install()
+			writePreset(t, "daily", "contoso")
+			base := f.srv
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/roleAssignmentScheduleInstances") {
+					<-r.Context().Done()
+					return
+				}
+				base.Config.Handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
+				tok := &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1", AccessToken: "fake"}
+				return []*session{
+					{Context: "contoso", Token: tok, Client: armclient.New(srv.URL, tok.AccessToken, srv.Client())},
+				}, nil, nil
+			})
+
+			start := time.Now()
+			args := append([]string{"down", "-c", "contoso", "-y"}, tc.args...)
+			out, stderr, err := runCmd(t, args...)
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("%v: %v\n%s\n%s", args, err, out, stderr)
+			}
+			if limit := defaultScopeSoftDeadline / 2; elapsed > limit {
+				t.Errorf("a named down waited %v on the blocked listing (limit %v)", elapsed, limit)
+			}
+			if len(f.putBodies()) != 1 || !strings.Contains(out, "DEACTIVATED") {
+				t.Errorf("sent %d requests; results:\n%s", len(f.putBodies()), out)
+			}
+			if strings.Contains(stderr, "could not read") {
+				t.Errorf("a listing that never landed was reported as read:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// TestNamedDownFindsAnActivationOnlyTheListingKnows: when --role/--scope or
+// --key match nothing in the eligibilities and the record, the activation
+// named may still be one the listing knows — made at a narrower scope from
+// another machine — so that is the one case a named down waits for it.
+func TestNamedDownFindsAnActivationOnlyTheListingKnows(t *testing.T) {
+	at := testProjectSubscription + "/resourceGroups/app-rg"
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"scope", []string{"--role", "Reader", "--scope", "app-rg"}},
+		{"key", []string{"--key", selectionKeyFor("contoso", at, testProjectRole)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := mkElig("Reader", testProjectRole, testProjectSubscription, "Dev", "Subscription")
+			a := mkActivated("Reader", testProjectRole, at, "app-rg", time.Now().Add(time.Hour))
+			a.ID = at + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances/1"
+			// Qualified at the activation scope, as ARM's per-scope listing
+			// reports it, so the request shows which row it was built from.
+			a.Properties.RoleDefinitionID = at + "/providers/Microsoft.Authorization/roleDefinitions/" + testProjectRole
+			f := &fakeARM{
+				t:             t,
+				eligibilities: []armclient.Eligibility{e},
+				activated:     []armclient.Assignment{a},
+				putStatus:     "Revoked",
+				activeDelay:   300 * time.Millisecond,
+			}
+			f.install()
+
+			args := append([]string{"down", "-c", "contoso", "-y", "--no-wait"}, tc.args...)
+			out, stderr, err := runCmd(t, args...)
+			if err != nil {
+				t.Fatalf("%v: %v\n%s\n%s", args, err, out, stderr)
+			}
+			puts := f.putBodies()
+			if len(puts) != 1 {
+				t.Fatalf("sent %d deactivations, want 1\n%s", len(puts), out)
+			}
+			props := mustObject(t, puts[0], "properties")
+			if id := mustText(t, props, "roleDefinitionId"); !strings.HasPrefix(id, at+"/") {
+				t.Fatalf("deactivated at the wrong scope: %s", id)
+			}
+		})
+	}
+}
+
+// TestNamedDownReadsDoesNotExistAgainstTheListing: a named down no longer
+// reads the listing before it asks ARM, but RoleAssignmentDoesNotExist still
+// means what it always did. When the listing — landing after the request —
+// shows the role held, the answer is propagation: the request is sent once
+// more with that evidence and the second refusal is a failure. When nothing
+// shows the role held, ARM's answer stands and the role is NOT ACTIVE.
+func TestNamedDownReadsDoesNotExistAgainstTheListing(t *testing.T) {
+	a := mkActivated(
+		"Cost Management Contributor",
+		costGUID,
+		"/providers/Microsoft.Management/managementGroups/contoso-prod",
+		"Contoso landing zones",
+		time.Now().Add(time.Hour),
+	)
+	a.ID = a.Properties.Scope + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances/1"
+	for _, tc := range []struct {
+		name     string
+		listed   []armclient.Assignment
+		attempts int32
+		want     string
+		fails    bool
+	}{
+		{"listed", []armclient.Assignment{a}, 2, "propagating", true},
+		{"not listed", nil, 1, "NOT ACTIVE", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeARM{
+				t:             t,
+				eligibilities: twoLowImpactRoles(),
+				activated:     tc.listed,
+				activeDelay:   300 * time.Millisecond,
+			}
+			var attempts atomic.Int32
+			f.setPutErr(func(string) (int, string) {
+				attempts.Add(1)
+				return 400, `{"error":{"code":"RoleAssignmentDoesNotExist","message":"The Role assignment does not exist."}}`
+			})
+			f.install()
+
+			out, _, err := runCmd(t, "down", "-c", "contoso", "--role", "Cost Management Contributor", "-y")
+			switch {
+			case tc.fails && (err == nil || ExitCode(err) != ExitFailed):
+				t.Fatalf("a role the listing shows held must fail: err = %v\n%s", err, out)
+			case !tc.fails && err != nil:
+				t.Fatalf("a role nothing shows held must not fail the run: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("results:\n%s", out)
+			}
+			if got := attempts.Load(); got != tc.attempts {
+				t.Errorf("sent the request %d time(s), want %d", got, tc.attempts)
+			}
+		})
+	}
+}
+
+// TestTargetFromEvidenceTrustsOnlyConfirmedRows: a recorded activation the
+// listing has not caught up with is this machine's own claim, which a bare
+// down checks against its schedule request first; a named down has not, so
+// such a target goes out without SeenActive. Every other row counts as held.
+func TestTargetFromEvidenceTrustsOnlyConfirmedRows(t *testing.T) {
+	for state, want := range map[rowState]bool{RowConfirmed: true, RowUnconfirmed: true, RowConfirming: false} {
+		r := activeRow{Context: "contoso", State: state}
+		r.Assignment = mkActivated("Reader", testProjectRole, testProjectSubscription, "Dev", time.Now().Add(time.Hour))
+		if got := targetFromEvidence(r).SeenActive; got != want {
+			t.Errorf("%s: SeenActive = %t, want %t", state, got, want)
+		}
 	}
 }

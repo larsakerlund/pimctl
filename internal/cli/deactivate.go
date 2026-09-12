@@ -1,6 +1,7 @@
 // `pimctl down` and `pimctl deactivate`: the flags, what a selection resolves
 // to, and the run itself. The ARM call a target becomes is in request.go, the
-// Target type in target.go, and the plan and results tables in report.go.
+// Target type in target.go, the evidence a named run reads ARM's answers
+// against in evidence.go, and the plan and results tables in report.go.
 
 package cli
 
@@ -155,8 +156,14 @@ func checkDeactivateFlags(o *deactivateOpts) error {
 	return nil
 }
 
-// runDeactivate reads what is currently activated, resolves the selection into
-// targets, confirms the plan and submits one request per target.
+// runDeactivate resolves the selection into targets, confirms the plan and
+// submits one request per target.
+//
+// A bare `down`, `--all` and the interactive picker act on what is currently
+// activated, so they read the activation listing first. A named selection —
+// a preset, --project, --role, --scope or --key — carries its own scopes and
+// role ids, so its listing runs in the background and is consulted only where
+// it changes an answer; see [runNamedDeactivation].
 //
 // It returns an error when the flags cannot work without a terminal, when no
 // activated role matched the selection, when a target has no session for its
@@ -179,15 +186,18 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 	if err != nil {
 		return err
 	}
+	if project != nil || hasExplicitSelection(o) {
+		return runNamedDeactivation(cmd, rc, o, presetEntries, selectedScopes)
+	}
 	ctx := rc.Ctx
 	active, failures, err := readActivations(ctx, cmd, rc, selectedScopes)
 	if err != nil {
 		return err
 	}
-	if done, doneErr := noDeactivationTargets(cmd, active, o, failures, project); done {
+	if done, doneErr := nothingToDeactivate(cmd, active, failures); done {
 		return doneErr
 	}
-	targets, selErr := selectTargets(ctx, cmd, rc, active, o, presetEntries)
+	targets, selErr := selectTargets(active, o)
 	if selErr != nil {
 		return selErr
 	}
@@ -197,11 +207,49 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 	if sessErr := attachSessions(targets, rc.Sessions); sessErr != nil {
 		return sessErr
 	}
-	return finishDeactivation(cmd, rc, o, targets, active, failures)
+	return finishDeactivation(cmd, rc, o, targets, active, failures, nil)
+}
+
+// runNamedDeactivation is the named half of [runDeactivate]: the listing
+// starts in the background, the targets are resolved from the eligibility
+// rows and the local record, and the requests go out without waiting for it.
+//
+// The listing costs a per-scope fan-out of seconds, and for a named selection
+// it changes only two things: how a "no such assignment" answer reads, and
+// whether a filter that matched nothing else can still find an activation the
+// record does not have. Both are handled where they arise — the first in
+// [activeEvidence.deactivate], the second in [selectNamedTargets] — so the
+// common run, where every named role is one this machine activated, pays for
+// no listing at all. Its failures are therefore not the run's: each role's
+// outcome is ARM's answer to its own request, and a scope the listing could
+// not read is noted under the results if the listing has landed by then.
+func runNamedDeactivation(
+	cmd *cobra.Command,
+	rc *runContext,
+	o *deactivateOpts,
+	presetEntries []config.PresetEntry,
+	scopes []activationScope,
+) error {
+	ev := startActiveEvidence(rc, scopes)
+	reportContextFailures(cmd.ErrOrStderr(), rc.Failures)
+	targets, err := selectNamedTargets(cmd, rc, o, presetEntries, ev)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return errors.New("no activated role matched the selection")
+	}
+	if sessErr := attachSessions(targets, rc.Sessions); sessErr != nil {
+		return sessErr
+	}
+	return finishDeactivation(cmd, rc, o, targets, ev.candidates(), rc.Failures, ev)
 }
 
 // finishDeactivation confirms and executes resolved targets, preserving ordinary
 // deactivation result reporting and per-role activation-record updates.
+//
+// ev is the evidence a named run reads ARM's answers against, and nil for a
+// run that read the listing up front; see [activeEvidence.deactivate].
 func finishDeactivation(
 	cmd *cobra.Command,
 	rc *runContext,
@@ -209,6 +257,7 @@ func finishDeactivation(
 	targets []target,
 	active []activeRow,
 	failures []error,
+	ev *activeEvidence,
 ) error {
 	ctx, opts := rc.Ctx, rc.Opts
 	multi := len(rc.Sessions) > 1
@@ -231,9 +280,50 @@ func finishDeactivation(
 
 	sp := term.NewSpinner(cmd.ErrOrStderr(), fmt.Sprintf("deactivating %s…", roleCount(len(targets))))
 	stream := streamProgress(cmd, opts, len(targets), sp, scopes)
-	results := executeDeactivations(ctx, targets, o.noWait, rc.Timeouts.poll, onEachResult(stream))
+	var results []result
+	if ev == nil {
+		results = executeDeactivations(ctx, targets, o.noWait, rc.Timeouts.poll, onEachResult(stream))
+	} else {
+		// The same runner, bound and ordering as executeDeactivations; only
+		// the per-item call differs, in how it reads a "no such assignment".
+		results = submitAll(targets, onEachResult(stream), func(t target) result {
+			return ev.deactivate(ctx, t, o.noWait, rc.Timeouts.poll)
+		})
+	}
 	sp.Stop()
-	return reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
+	// Requests have already been sent to ARM, so nothing below may return
+	// early — the user must always see which roles landed and the right exit
+	// code.
+	runErr := reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
+	if ev != nil {
+		reportListingGaps(cmd.ErrOrStderr(), rc, ev)
+	}
+	return runErr
+}
+
+// reportListingGaps names on w the scopes a named run's background listing
+// could not read, under a note saying what that does and does not mean, and
+// prints nothing while the listing has not landed or read everything. It goes
+// after the results table because the table is ARM's per-request answer and
+// this is only a caveat on how a "no such assignment" was read, and to stderr
+// so `-o json` stdout stays machine-readable.
+func reportListingGaps(w io.Writer, rc *runContext, ev *activeEvidence) {
+	errs, unconfirmed := ev.gaps()
+	if len(errs)+len(unconfirmed) == 0 {
+		return
+	}
+	fmt.Fprintf(
+		w,
+		"note: the activation listing could not read %d scope(s); "+
+			"each role's result above is ARM's own answer to its request:\n",
+		len(errs)+len(unconfirmed),
+	)
+	for _, err := range errs {
+		fmt.Fprintf(w, "  %v\n", err)
+	}
+	for _, label := range labelScopes(rc, unconfirmed) {
+		fmt.Fprintf(w, "  %s: ARM did not answer within the deadline\n", label)
+	}
 }
 
 // readActivations reads Azure and local activation evidence, retaining recorded
@@ -273,14 +363,10 @@ func readActivations(
 // nothingToDeactivate handles an empty listing the user did not narrow.
 //
 // Only a bare "give me everything" depends on the listing being complete; a
-// named selection is attempted regardless — see selectTargets.
-func nothingToDeactivate(
-	cmd *cobra.Command,
-	active []activeRow,
-	o *deactivateOpts,
-	failures []error,
-) (handled bool, err error) {
-	if len(active) > 0 || hasExplicitSelection(o) {
+// named selection never comes here, because it is attempted regardless — see
+// [runNamedDeactivation].
+func nothingToDeactivate(cmd *cobra.Command, active []activeRow, failures []error) (handled bool, err error) {
+	if len(active) > 0 {
 		return false, nil
 	}
 	if len(failures) > 0 {
@@ -306,68 +392,17 @@ func hasExplicitSelection(o *deactivateOpts) bool {
 	return o.preset != "" || len(o.roles) > 0 || len(o.scopes) > 0 || len(o.keys) > 0
 }
 
-// selectTargets resolves what to deactivate.
-//
-// A named selection does not trust the activation listing. ARM has been
-// observed dropping genuinely-active roles from both
-// roleAssignmentScheduleInstances and roleAssignmentSchedules for ten minutes
-// at a stretch, with no revocation in the request log — during which
-// `deactivate --all` reported nothing to do and exited 0 while the roles were
-// still held. So when the user names roles, pimctl asks ARM about those roles
-// and reports ARM's answer per role, rather than concluding from a listing that
-// can be wrong.
-func selectTargets(
-	ctx context.Context,
-	cmd *cobra.Command,
-	rc *runContext,
-	active []activeRow,
-	o *deactivateOpts,
-	presetEntries []config.PresetEntry,
-) ([]target, error) {
-	activeTargets := make([]target, 0, len(active))
-	for _, a := range active {
-		activeTargets = append(activeTargets, targetFromActive(a))
-	}
-
-	switch {
-	case o.preset != "" || o.projectOpts.selected():
-		// A preset carries scope and role id, so it needs no listing at all.
-		selected := make([]target, 0, len(presetEntries))
-		for _, e := range presetEntries {
-			selected = append(selected, targetFromPreset(e))
+// selectTargets resolves a bare `down`, `--all` or the interactive picker
+// against what the listing and the record show held. A named selection is
+// resolved by [selectNamedTargets] instead.
+func selectTargets(active []activeRow, o *deactivateOpts) ([]target, error) {
+	if o.all || o.impliedAll {
+		activeTargets := make([]target, 0, len(active))
+		for _, a := range active {
+			activeTargets = append(activeTargets, targetFromActive(a))
 		}
-		return mergeTargets(selected, activeTargets), nil
-
-	case len(o.keys) > 0, len(o.roles) > 0, len(o.scopes) > 0:
-		// Match against eligibility, which is cached and complete, plus every
-		// activation whose scope no eligibility carries, then merge in anything
-		// the activation listing did show.
-		rows, listErrs, _ := readEligibilities(ctx, cmd, rc)
-		if len(listErrs) > 0 {
-			reportContextFailures(cmd.ErrOrStderr(), listErrs)
-		}
-		rows = withActiveRows(rows, active)
-		var chosen []row
-		var err error
-		if len(o.keys) > 0 {
-			if chosen, err = selectByKeys(rows, o.keys); err != nil {
-				return nil, err
-			}
-		} else {
-			var report string
-			chosen, report = selectByName(rows, o.roles, o.scopes)
-			fmt.Fprintln(cmd.ErrOrStderr(), report)
-		}
-		selected := make([]target, 0, len(chosen))
-		for _, r := range chosen {
-			selected = append(selected, targetFromEligible(r))
-		}
-		return mergeTargets(selected, activeTargets), nil
-
-	case o.all, o.impliedAll:
 		return activeTargets, nil
 	}
-
 	picked, err := selectInteractiveActive(active, multipleActiveContexts(active), scopeLabelerForActive(active))
 	if err != nil {
 		return nil, err
@@ -377,6 +412,98 @@ func selectTargets(
 		out = append(out, targetFromActive(p))
 	}
 	return out, nil
+}
+
+// selectNamedTargets resolves a preset, --project, --role, --scope or --key
+// selection without waiting for the activation listing.
+//
+// A named selection does not trust the activation listing. ARM has been
+// observed dropping genuinely-active roles from both
+// roleAssignmentScheduleInstances and roleAssignmentSchedules for ten minutes
+// at a stretch, with no revocation in the request log — during which
+// `deactivate --all` reported nothing to do and exited 0 while the roles were
+// still held. So when the user names roles, pimctl asks ARM about those roles
+// and reports ARM's answer per role, rather than concluding from a listing that
+// can be wrong.
+//
+// It does not wait for the listing either: a preset carries scope and role id,
+// and --role, --scope and --key match against the eligibility rows and the
+// record, both of which are on hand. What the record holds is merged into the
+// targets so their session and window come along, and so a "no such
+// assignment" for a role this machine saw held reads as propagation. The
+// listing is waited for only when the filters matched nothing, in case the
+// activation they name is one the record does not have — see [withActiveRows].
+// It returns selectByKeys' refusal of a key that matches nothing or too much.
+func selectNamedTargets(
+	cmd *cobra.Command,
+	rc *runContext,
+	o *deactivateOpts,
+	presetEntries []config.PresetEntry,
+	ev *activeEvidence,
+) ([]target, error) {
+	if o.preset != "" || o.projectOpts.selected() {
+		// A preset carries scope and role id, so it needs no listing at all.
+		selected := make([]target, 0, len(presetEntries))
+		for _, e := range presetEntries {
+			selected = append(selected, targetFromPreset(e))
+		}
+		return mergeTargets(selected, evidenceTargets(ev.candidates())), nil
+	}
+
+	// Match against eligibility, which is cached and complete, plus every
+	// activation the record holds at a scope no eligibility carries.
+	rows, listErrs, _ := readEligibilityRows(rc.Ctx, cmd, rc)
+	if len(listErrs) > 0 {
+		reportContextFailures(cmd.ErrOrStderr(), listErrs)
+	}
+	chosen, report, err := matchNamedRows(withActiveRows(rows, ev.candidates()), o)
+	if len(chosen) == 0 {
+		// Nothing on hand matches. The activation named may be one only the
+		// listing knows — made at a narrower scope from another machine, say
+		// — so this is the one place a named run waits for it, and the match
+		// is answered from the listing as a bare `down` would have read it.
+		sp := term.NewSpinner(cmd.ErrOrStderr(), "reading active roles…")
+		active, _ := ev.wait(-1)
+		sp.Stop()
+		if abortedEarly(rc.Ctx) {
+			return nil, rc.Ctx.Err()
+		}
+		chosen, report, err = matchNamedRows(withActiveRows(rows, active), o)
+	}
+	if report != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), report)
+	}
+	if err != nil {
+		return nil, err
+	}
+	selected := make([]target, 0, len(chosen))
+	for _, r := range chosen {
+		selected = append(selected, targetFromEligible(r))
+	}
+	return mergeTargets(selected, evidenceTargets(ev.candidates())), nil
+}
+
+// matchNamedRows applies --key, or --role and --scope, to rows. report is the
+// line selectByName wants printed, and empty for --key; err is selectByKeys'
+// refusal of a key that matches nothing, too much or is too short, which
+// selectByName never gives.
+func matchNamedRows(rows []row, o *deactivateOpts) (chosen []row, report string, err error) {
+	if len(o.keys) > 0 {
+		chosen, err = selectByKeys(rows, o.keys)
+		return chosen, "", err
+	}
+	chosen, report = selectByName(rows, o.roles, o.scopes)
+	return chosen, report, nil
+}
+
+// evidenceTargets renders the rows a named run believes held as targets; see
+// [targetFromEvidence] for what each one's SeenActive means.
+func evidenceTargets(active []activeRow) []target {
+	out := make([]target, 0, len(active))
+	for _, a := range active {
+		out = append(out, targetFromEvidence(a))
+	}
+	return out
 }
 
 // withActiveRows appends to the eligibility rows one row for each activation
@@ -445,21 +572,6 @@ func deactivateScopeLabeler(targets []target, active []activeRow) scopeLabeler {
 		refs = append(refs, scopeRef{Name: a.Assignment.ScopeName(), ID: a.Assignment.Properties.Scope})
 	}
 	return newScopeLabeler(refs)
-}
-
-// noDeactivationTargets preserves ordinary empty-selection output while allowing
-// explicit project targets to reach ARM even when its listing dropped a row.
-func noDeactivationTargets(
-	cmd *cobra.Command,
-	active []activeRow,
-	o *deactivateOpts,
-	failures []error,
-	project *config.Project,
-) (bool, error) {
-	if project != nil {
-		return false, nil
-	}
-	return nothingToDeactivate(cmd, active, o, failures)
 }
 
 // projectDeactivation adapts exact project targets after checking the tenant.
