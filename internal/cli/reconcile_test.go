@@ -8,6 +8,7 @@ package cli
 
 import (
 	"bytes"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -493,5 +494,42 @@ func TestDebugNamesTheConfirmationStep(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "confirm 1 activation(s) against their requests") {
 		t.Errorf("the confirmation step is unnamed in the breakdown:\n%s", errOut)
+	}
+}
+
+// TestOpenRequestIsNotRecordedAsHeld: ARM refusing a request because an
+// earlier one is still open says nothing about what is held — the obvious case
+// is that earlier request still waiting on an approver. The run must fail
+// rather than read as already-active, and the record must stay empty: an entry
+// written here would make `status` show the role as held for the whole
+// confirmation window.
+func TestOpenRequestIsNotRecordedAsHeld(t *testing.T) {
+	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()}
+	f.install()
+	f.setPutErr(func(string) (int, string) {
+		return http.StatusBadRequest,
+			`{"error":{"code":"RoleAssignmentScheduleRequestExists","message":"A role assignment schedule request already exists."}}`
+	})
+
+	out, _, err := runCmd(t, "up", "-c", "contoso", "--all", "-j", "x", "-y")
+	if err == nil || ExitCode(err) != ExitFailed {
+		t.Fatalf("an open request must exit %d, got err=%v", ExitFailed, err)
+	}
+	if strings.Contains(out, "ALREADY ACTIVE") {
+		t.Errorf("an open request was reported as already active:\n%s", out)
+	}
+	for _, want := range []string{"FAILED", "request exists", "pimctl status"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+	if got := readRecord(testOwner("contoso")); len(got) != 0 {
+		t.Fatalf("the record holds %d entries after a refused request, want none: %+v", len(got), got)
+	}
+	rows := localActiveRows(&runContext{Sessions: []*session{{
+		Context: "contoso", Token: &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1"},
+	}}})
+	if len(rows) != 0 {
+		t.Fatalf("status would show %d roles from the record, want none", len(rows))
 	}
 }

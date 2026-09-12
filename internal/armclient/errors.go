@@ -38,6 +38,10 @@ const (
 	// KindMinimumDuration means PIM refuses the operation because the role has
 	// not been active for its minimum five minutes yet.
 	KindMinimumDuration
+	// KindRequestExists means an earlier schedule request for the same role and
+	// scope is still open — typically one waiting on an approver. It is not
+	// [KindAlreadyActive]: a request that exists is not a role that is held.
+	KindRequestExists
 )
 
 // APIError is a non-2xx ARM response.
@@ -137,18 +141,29 @@ type armErrorEnvelope struct {
 	} `json:"error"`
 }
 
-// alreadyActiveCodes are the ARM error codes meaning "you already hold this".
-var alreadyActiveCodes = map[string]bool{
-	"RoleAssignmentExists":                true,
-	"RoleAssignmentRequestExists":         true,
-	"RoleAssignmentScheduleRequestExists": true,
-	"RoleAssignmentScheduleExists":        true,
+// codeKinds maps each ARM error code pimctl reacts to onto its kind. The two
+// "exists" families are the ones easy to conflate: an assignment or schedule
+// that exists means the role is held, while a *request* that exists means an
+// earlier request for the same role and scope is still undecided — typically
+// waiting on an approver. ARM refuses a second request until the first is
+// settled, so the role is not held, and reading that as already-active would
+// exit 0 and record access nobody has.
+var codeKinds = map[string]ErrorKind{
+	"RoleAssignmentExists":                        KindAlreadyActive,    // the assignment is in place.
+	"RoleAssignmentScheduleExists":                KindAlreadyActive,    // the schedule behind it is.
+	"RoleAssignmentRequestExists":                 KindRequestExists,    // an earlier request is still open.
+	"RoleAssignmentScheduleRequestExists":         KindRequestExists,    // the same, for a schedule request.
+	"RoleAssignmentDoesNotExist":                  KindNotActive,        // nothing to deactivate, or not yet propagated.
+	"ActiveDurationTooShort":                      KindMinimumDuration,  // PIM's five-minute floor.
+	"RoleAssignmentRequestAcrsValidationFailed":   KindClaimsChallenge,  // Conditional Access wants a stepped-up token.
+	"RoleAssignmentRequestPolicyValidationFailed": KindPolicyValidation, // the policy's rules refused it.
 }
 
-// alreadyActivePhrases are the message wordings that mean the same thing as an
-// [alreadyActiveCodes] entry. They are matched as well as the codes because
-// some tenants report the condition under a plain BadRequest, where the
-// phrasing is the only thing left to go on.
+// alreadyActivePhrases are the message wordings that mean the same thing as a
+// [KindAlreadyActive] code. They are matched as well as the codes because some
+// tenants report the condition under a plain BadRequest, where the phrasing is
+// the only thing left to go on. A code in [codeKinds] always wins over them, so
+// an open-request refusal is never downgraded to already-active by its wording.
 var alreadyActivePhrases = []string{
 	"role assignment already exists",
 	"already active",
@@ -184,19 +199,12 @@ func ParseAPIError(method, url string, status int, body []byte, header http.Head
 	}
 	lowerMsg := strings.ToLower(e.Message + " " + e.Body)
 
-	switch {
-	case alreadyActiveCodes[e.Code]:
+	if kind, known := codeKinds[e.Code]; known {
+		e.Kind = kind
+	} else if containsAny(lowerMsg, alreadyActivePhrases) {
 		e.Kind = KindAlreadyActive
-	case containsAny(lowerMsg, alreadyActivePhrases):
-		e.Kind = KindAlreadyActive
-	case e.Code == "RoleAssignmentDoesNotExist":
-		e.Kind = KindNotActive
-	case e.Code == "ActiveDurationTooShort":
-		e.Kind = KindMinimumDuration
-	case e.Code == "RoleAssignmentRequestAcrsValidationFailed":
-		e.Kind = KindClaimsChallenge
-	case e.Code == "RoleAssignmentRequestPolicyValidationFailed":
-		e.Kind = KindPolicyValidation
+	}
+	if e.Kind == KindPolicyValidation {
 		e.FailedRules = extractFailedRules(e.Message)
 	}
 
