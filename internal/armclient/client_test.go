@@ -61,6 +61,17 @@ func mustObject(t *testing.T, m map[string]any, key string) map[string]any {
 	return v
 }
 
+// assertPinnedAPIVersion checks the api-version against the literal the PIM
+// endpoints are pinned to, rather than against [APIVersion]: a test comparing
+// the constant to itself would pass however the constant changed. Called from
+// the fake server's goroutine, so it uses Errorf.
+func assertPinnedAPIVersion(t *testing.T, r *http.Request) {
+	t.Helper()
+	if got := r.URL.Query().Get("api-version"); got != "2020-10-01" {
+		t.Errorf("%s %s: api-version = %q, want 2020-10-01", r.Method, r.URL.Path, got)
+	}
+}
+
 // newTestClient wires a Client to a fake ARM. No test touches the network.
 func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()
@@ -73,9 +84,7 @@ func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 // carry, including the one built from a nextLink.
 func assertListingQuery(t *testing.T, r *http.Request) {
 	t.Helper()
-	if got := r.URL.Query().Get("api-version"); got != APIVersion {
-		t.Errorf("api-version = %q", got)
-	}
+	assertPinnedAPIVersion(t, r)
 	if f := r.URL.Query().Get("$filter"); f != "asTarget()" {
 		t.Errorf("$filter = %q, want asTarget()", f)
 	}
@@ -208,6 +217,7 @@ func TestGetRoleSettingsParsesRealPolicy(t *testing.T) {
 	var calls atomic.Int32
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		assertPinnedAPIVersion(t, r)
 		switch {
 		case strings.Contains(r.URL.Path, "roleManagementPolicyAssignments"):
 			filter := r.URL.Query().Get("$filter")
@@ -311,6 +321,7 @@ func TestSubmitRequestSendsProvenBodyShape(t *testing.T) {
 	var gotBody map[string]any
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotMethod = r.URL.Path, r.Method
+		assertPinnedAPIVersion(t, r)
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Errorf("decoding the request body: %v", err)
 			return
@@ -366,6 +377,29 @@ func TestSubmitRequestSendsProvenBodyShape(t *testing.T) {
 	}
 	if sr.Properties.Status != StatusProvisioned {
 		t.Errorf("status = %q", sr.Properties.Status)
+	}
+}
+
+// TestGetRequestReadsBackByIDWithPinnedAPIVersion: the read-back the poll
+// loop makes is a GET of the request's own ARM id under the same api-version
+// as the PUT that created it.
+func TestGetRequestReadsBackByIDWithPinnedAPIVersion(t *testing.T) {
+	const id = "/subscriptions/s/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/dddddddd-dddd-dddd-dddd-dddddddddddd"
+	var gotPath, gotMethod string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		assertPinnedAPIVersion(t, r)
+		fmt.Fprintf(w, `{"id":%q,"properties":{"status":"PendingProvisioning"}}`, id)
+	})
+	sr, err := c.GetRequest(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetRequest: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != id {
+		t.Errorf("read back with %s %s, want GET %s", gotMethod, gotPath, id)
+	}
+	if sr.ID != id || sr.Properties.Status != "PendingProvisioning" {
+		t.Errorf("decoded %+v", sr)
 	}
 }
 

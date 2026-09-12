@@ -7,6 +7,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -420,4 +421,140 @@ func TestNoEligibilitiesStillFallsBack(t *testing.T) {
 	if f.tenantWideCount() == 0 {
 		t.Error("with nothing eligible, the tenant-wide listing is the only thing left to ask")
 	}
+}
+
+// activatedAt is a live activation of role at a management-group scope, with
+// the instance id ARM would give it, ending an hour from now.
+func activatedAt(role, roleGUID, scope, leaf string) armclient.Assignment {
+	a := mkActivated(role, roleGUID, scope, "Contoso landing zones", time.Now().Add(time.Hour))
+	a.ID = scope + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances/" + leaf
+	a.Properties.ExpandedProperties.Scope = armclient.Named{
+		DisplayName: "Contoso landing zones", Type: "managementgroup", ID: scope,
+	}
+	return a
+}
+
+// statusJSONOf runs `status -o json` for the one fake context and decodes the
+// envelope.
+func statusJSONOf(t *testing.T) statusJSON {
+	t.Helper()
+	out, errOut, err := runCmd(t, "status", "-c", "contoso", "-o", "json")
+	if err != nil {
+		t.Fatalf("status: %v (stderr %q)", err, errOut)
+	}
+	var got statusJSON
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("status -o json is not valid JSON: %v\n%s", err, out)
+	}
+	return got
+}
+
+// assertConfirmedRole checks that the one role the fake holds came back with
+// Azure's confirmation and that no scope was left unread.
+func assertConfirmedRole(t *testing.T, got statusJSON) {
+	t.Helper()
+	if len(got.UnconfirmedScopes) != 0 {
+		t.Errorf("a scope was left unconfirmed: %v", got.UnconfirmedScopes)
+	}
+	if len(got.Roles) != 1 {
+		t.Fatalf("got %d roles, want 1: %+v", len(got.Roles), got.Roles)
+	}
+	if !got.Roles[0].Confirmed || got.Roles[0].State != "confirmed" {
+		t.Errorf("the role is %q (confirmed=%v), want Azure's confirmation",
+			got.Roles[0].State, got.Roles[0].Confirmed)
+	}
+}
+
+// TestPagedScopeListingShowsEveryRow: ARM pages a long per-scope listing behind
+// a nextLink, and a role on the second page is held just as much as one on the
+// first. A listing that stopped at the first page would under-report.
+func TestPagedScopeListingShowsEveryRow(t *testing.T) {
+	elig := twoLowImpactRoles()[:1]
+	scope := elig[0].Properties.Scope
+	f := &fakeARM{
+		t:             t,
+		eligibilities: elig,
+		activated: []armclient.Assignment{
+			activatedAt("Cost Management Contributor", costGUID, scope, "page1"),
+			activatedAt("Resource Policy Contributor", "36243c78-bf99-498c-9df9-86d9f8d28608", scope, "page2"),
+		},
+		pagedScope: scope,
+	}
+	f.install()
+
+	out, errOut, err := runCmd(t, "status", "-c", "contoso")
+	if err != nil {
+		t.Fatalf("status: %v (stderr %q)", err, errOut)
+	}
+	if n := f.secondPageCount(); n != 1 {
+		t.Errorf("the second page was fetched %d time(s), want 1", n)
+	}
+	for _, want := range []string{"Cost Management Contributor", "Resource Policy Contributor"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the paged listing lost %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(errOut, "unconfirmed") {
+		t.Errorf("a paged scope must read as confirmed: %q", errOut)
+	}
+}
+
+// TestTransientScopeFailuresAreRetriedToConfirmation: a 503 or 504 on one leg
+// of the fan-out is ARM asking to be asked again, not an answer. After the
+// retry the scope is confirmed, so its roles carry no "?" and it is not named
+// as unread.
+func TestTransientScopeFailuresAreRetriedToConfirmation(t *testing.T) {
+	for _, code := range []int{http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			elig := twoLowImpactRoles()[:1]
+			scope := elig[0].Properties.Scope
+			f := &fakeARM{
+				t:             t,
+				eligibilities: elig,
+				activated: []armclient.Assignment{
+					activatedAt("Cost Management Contributor", costGUID, scope, "one"),
+				},
+			}
+			f.install()
+			// Retry-After: 0 makes the retry immediate; waiting out a
+			// non-zero header is TestRetryAfterIsHonouredOnAScopeListing.
+			f.failScope(scope, code, "0", 1)
+
+			got := statusJSONOf(t)
+			if n := f.scopeGetCount(scope); n != 2 {
+				t.Errorf("the scope was asked %d time(s), want 2: the %d and then the answer", n, code)
+			}
+			assertConfirmedRole(t, got)
+		})
+	}
+}
+
+// TestRetryAfterIsHonouredOnAScopeListing: when ARM says how long to wait,
+// pimctl waits that long — no less, so the retry is not itself throttled, and
+// not so much longer that the scope misses its soft deadline.
+func TestRetryAfterIsHonouredOnAScopeListing(t *testing.T) {
+	elig := twoLowImpactRoles()[:1]
+	scope := elig[0].Properties.Scope
+	f := &fakeARM{
+		t:             t,
+		eligibilities: elig,
+		activated:     []armclient.Assignment{activatedAt("Cost Management Contributor", costGUID, scope, "one")},
+	}
+	f.install()
+	f.failScope(scope, http.StatusTooManyRequests, "1", 1)
+
+	start := time.Now()
+	got := statusJSONOf(t)
+	elapsed := time.Since(start)
+	if elapsed < time.Second {
+		t.Errorf("status answered after %v; a Retry-After of 1 s was not waited for", elapsed)
+	}
+	if elapsed > defaultScopeSoftDeadline {
+		t.Errorf("status took %v; a 1 s Retry-After fits inside the %v soft deadline",
+			elapsed, defaultScopeSoftDeadline)
+	}
+	if n := f.scopeGetCount(scope); n != 2 {
+		t.Errorf("the scope was asked %d time(s), want 2: the 429 and then the answer", n)
+	}
+	assertConfirmedRole(t, got)
 }
