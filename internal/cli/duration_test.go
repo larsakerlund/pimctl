@@ -126,7 +126,7 @@ func FuzzRequestedDurationFor(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, in string) {
 		cmd := durationCmd(t, map[string]string{"for": in})
-		d, err := requestedDuration(cmd, in, 0, "")
+		d, err := requestedDuration(cmd, in)
 		if err == nil && d <= 0 {
 			t.Errorf("requestedDuration(--for %q) = %v with no error; zero would mean the policy maximum", in, d)
 		}
