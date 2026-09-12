@@ -1,66 +1,39 @@
-# Security
+# Security policy
 
-## What pimctl holds, and where
+## Supported versions
 
-pimctl does not log in. It asks the Azure CLI for an ARM access token and talks
-to `management.azure.com` directly, so the credential it handles is a bearer
-token minted by `az` and valid for about an hour.
+pimctl is pre-1.0. Only the latest release receives security fixes, shipped as
+the next patch or minor release. Older releases are not patched: upgrade with
+`install.sh` or `go install github.com/larsakerlund/pimctl/cmd/pimctl@latest`.
 
-| Path | Contents | Mode |
-|---|---|---|
-| `$CLOUDCTX_STORE/pimctl/token-<context>.json` | one ARM access token per context, with az's epoch `expires_on` preferred over its local-time expiry string | `0600` in a `0700` directory; refused if the directory is group- or other-accessible |
-| `$CLOUDCTX_STORE/pimctl/active-<context>-<account>.json` | what this machine activated | `0600` |
-| `$XDG_CACHE_HOME/pimctl/eligibilities-<context>-<account>.json` | role names and scope ids | `0600` |
-| `$XDG_CACHE_HOME/pimctl/policies-<context>-<account>.json` | PIM policy per role and scope | `0600` |
-| `$XDG_CACHE_HOME/pimctl/cloudctx-version.json` | the probed cloudctx version, keyed by the binary's path, size and mtime, for 24 h | `0600` |
-| `$XDG_CONFIG_HOME/pimctl/{presets,state}.json` | saved selections, last justification | `0600` |
+## Reporting a vulnerability
 
-The first two belong to one cloudctx context, so they live inside that context's
-own store and `cloudctx delete <name>` sweeps them. Without cloudctx, and for
-the shared `az login`, which belongs to no context, they fall back to
-`$XDG_CACHE_HOME/pimctl` and `$XDG_STATE_HOME/pimctl`.
+Report privately through GitHub:
+<https://github.com/larsakerlund/pimctl/security/advisories/new>. Do not open a
+public issue for anything that could let someone read a token, activate or keep
+a role they should not have, or run code on the machine pimctl runs on.
 
-`<account>` is a digest of the context, tenant id, and principal id. Each role
-cache and activation record also stores that ownership and checks it on read.
-Older files without account ownership are ignored; `cache clear --all` can
-remove them. Switching accounts preserves each account's separate state.
+If the private form is unavailable to you, open an issue that says only that
+you have something to report privately, and a channel will be arranged there.
 
-Token reuse checks the selected Azure CLI profile's tenant and user against the
-cached token. An absent or unrecognisable account causes a fresh token mint.
-A refresh during a command must preserve its tenant and principal.
+Include what a reproduction needs: the output of `pimctl version`, the exact
+command, its exit code, and `--debug` output if it helps. `--debug` never prints
+a token; do not paste one from anywhere else either.
 
-Only the first is a credential. The token cache is **refused on read** if its
-mode has been widened, is versioned and carries the context it was minted for,
-and is written atomically with the mode set before the first byte — so it never
-exists on disk world-readable, not even for an instant.
+## What to expect
 
-`az` already stores access and refresh tokens unencrypted in
-`~/.azure/msal_token_cache.json` at `0600`. pimctl's cache is a second copy of a
-credential the machine already holds, not a new class of exposure. It exists
-because minting one costs an `az` process launch (1.23 s measured) on every
-command.
+- An acknowledgement within seven days.
+- A fix in a release, with the advisory published and credit to the reporter
+  unless they prefer otherwise.
+- Coordinated disclosure: please allow the fix to ship before publishing
+  details. There is no bounty programme.
 
-Tokens are never logged. `--debug` reports only `cache hit` or `cache miss`, and
-every URL in an error has its query string stripped before it is printed.
+## Scope
 
-Authenticated requests, pagination links and redirects are constrained to the
-configured ARM origin: scheme, hostname and effective port must match. A link
-to another host or an HTTP downgrade is rejected before sending the token.
+In scope: the `pimctl` binary, `install.sh`, the release workflow and the
+files pimctl writes on disk.
 
-## Reducing what is kept
-
-- `pimctl cache clear` deletes the tokens, listings, policies and the probed
-  cloudctx version. It leaves the activation record alone, because deleting
-  that makes the next `status` under-report roles you still hold;
-  `pimctl cache clear --all` deletes it too.
-- Deactivate when you are done: `pimctl down`. A time-boxed role you are not
-  using is still a role someone could use.
-- On a shared or multi-user machine, set `XDG_CACHE_HOME` somewhere only you can
-  read. The `0700` directory is the floor, not a guarantee about the filesystem
-  underneath it.
-
-## Reporting something
-
-This is a personal tool with one maintainer. Open an issue for anything that is
-not itself sensitive; for anything that is, mail the address in the commit log
-and give it a few days before disclosing.
+Out of scope: Azure PIM, the Azure CLI and cloudctx themselves. Report those to
+their owners. Where pimctl keeps its caches and the token, and how they are
+protected, is described in `pimctl help auth` and in
+[docs/design.md](docs/design.md#token-caching).

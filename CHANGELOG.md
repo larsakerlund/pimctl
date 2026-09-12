@@ -70,6 +70,9 @@ inside a context window.
 
 ### Changed
 
+- SECURITY.md is now a security policy only: supported versions, how to report
+  privately, and what to expect. Where pimctl keeps files is described by
+  `pimctl help auth` and docs/design.md.
 - `make check` runs the race suite twice, so a test that leaks state into a
   later run fails locally rather than only under `-count=2`.
 - The token cache is refused when its directory is group- or other-accessible,

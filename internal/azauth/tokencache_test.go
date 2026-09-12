@@ -157,7 +157,7 @@ func TestTokenCacheRefusesWidePermissions(t *testing.T) {
 }
 
 // TestTokenCacheRefusesAWideDirectory: the file being 0600 is half of the
-// promise SECURITY.md makes; the other half is the 0700 directory around it. A
+// promise docs/design.md makes; the other half is the 0700 directory around it. A
 // directory group or other can enter names the context beside a credential and,
 // if writable, lets the file be replaced with one they can read — so it is
 // refused the way a wide file is, naming the directory to chmod.

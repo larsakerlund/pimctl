@@ -88,7 +88,7 @@ use `npx skills add ./ --skill pimctl`.
 cloudctx version.
 `pimctl cache clear --all` also forgets activations recorded on this machine;
 it **does not deactivate roles** and can make the next status under-report them.
-See [stored data](../SECURITY.md#what-pimctl-holds-and-where) for locations.
+See `pimctl cache path`, or [token caching](design.md#token-caching), for locations.
 
 To uninstall, remove `~/.local/bin/pimctl` and any shell completions you
 installed. `pimctl cache path` prints the cache directory if you want to remove
