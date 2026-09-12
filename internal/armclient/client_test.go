@@ -7,6 +7,7 @@
 package armclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -499,8 +501,8 @@ func TestRetriesThrottledResponses(t *testing.T) {
 	}
 }
 
-// TestGivesUpAfterMaxRetries: retrying is per client now, not a package
-// variable a test has to put back, so a client can be told how patient to be.
+// TestGivesUpAfterMaxRetries: retrying is per client, so a client can be told
+// how patient to be without a package variable a test has to put back.
 func TestGivesUpAfterMaxRetries(t *testing.T) {
 	const maxRetries = 2
 
@@ -557,6 +559,92 @@ func TestRetryDelayHonoursRetryAfter(t *testing.T) {
 	}
 	if got := retryDelay(none, 3); got != 8*time.Second {
 		t.Errorf("attempt 3 backoff = %v, want 8s", got)
+	}
+}
+
+func TestRetryDelayIsCapped(t *testing.T) {
+	// ARM may say Retry-After: 86400. The field keeps what ARM said, so a
+	// caller can see it; the sleep is clamped so the CLI does not park for a
+	// day per attempt.
+	h := http.Header{}
+	h.Set("Retry-After", "86400")
+	ae := ParseAPIError("GET", "/x", 429, nil, h)
+	if ae.RetryAfter != 86400*time.Second {
+		t.Errorf("RetryAfter = %v, want the header's value untouched", ae.RetryAfter)
+	}
+	if got := retryDelay(ae, 0); got != MaxRetryDelay {
+		t.Errorf("retryDelay = %v, want the %v cap", got, MaxRetryDelay)
+	}
+	// A value under the cap goes through as is.
+	h.Set("Retry-After", "59")
+	if got := retryDelay(ParseAPIError("GET", "/x", 429, nil, h), 0); got != 59*time.Second {
+		t.Errorf("retryDelay = %v, want 59s", got)
+	}
+	// The backoff obeys the same cap when a client is told to retry many times.
+	none := ParseAPIError("GET", "/x", 429, nil, http.Header{})
+	if got := retryDelay(none, 20); got != MaxRetryDelay {
+		t.Errorf("attempt 20 backoff = %v, want the %v cap", got, MaxRetryDelay)
+	}
+}
+
+func TestRetryWithHugeRetryAfterWaitsAtMostTheCap(t *testing.T) {
+	// End to end: a throttled call whose Retry-After is a day must not sleep a
+	// day. The client is given one retry and a context that expires well under
+	// the cap, so the test measures that the sleep was bounded by the context
+	// rather than by the header.
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "86400")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	c.MaxRetries = 1
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.ListEligibilities(ctx)
+	if err == nil {
+		t.Fatal("expected the throttling error")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("a Retry-After of a day held the call for %v", elapsed)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("made %d calls, want 1: the retry wait must outlast the context", calls.Load())
+	}
+}
+
+func TestResponseBodyIsCapped(t *testing.T) {
+	// A body one byte over MaxResponseBytes is refused with the cap named; one
+	// exactly at the cap is read in full.
+	for _, over := range []bool{true, false} {
+		size := MaxResponseBytes
+		if over {
+			size++
+		}
+		c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", strconv.Itoa(size))
+			chunk := bytes.Repeat([]byte{' '}, 1<<20)
+			for left := size; left > 0; {
+				n := min(left, len(chunk))
+				if _, err := w.Write(chunk[:n]); err != nil {
+					t.Errorf("writing the oversized body: %v", err)
+					return
+				}
+				left -= n
+			}
+		})
+		raw, err := c.do(context.Background(), http.MethodGet, c.Host+"/x", nil)
+		switch {
+		case over && err == nil:
+			t.Fatalf("a %d-byte body was read without complaint", size)
+		case over && !strings.Contains(err.Error(), "32 MiB"):
+			t.Fatalf("the error must name the cap: %v", err)
+		case !over && err != nil:
+			t.Fatalf("a body exactly at the cap must be read: %v", err)
+		case !over && len(raw) != size:
+			t.Fatalf("read %d bytes, want %d", len(raw), size)
+		}
 	}
 }
 
@@ -711,6 +799,111 @@ func TestPollDeadlineBoundsSleepRequestsAndRetryAfter(t *testing.T) {
 				t.Fatalf("made %d calls, want %d", calls.Load(), wantCalls)
 			}
 		})
+	}
+}
+
+func TestPollRetriesTransientReadErrorsWithinBudget(t *testing.T) {
+	// The PUT was accepted, so a read that fails says nothing about the
+	// request's fate: a 404 while ARM is still propagating the request, then a
+	// non-terminal 200, then a terminal one must end as Provisioned with no
+	// error, having read the request once per step.
+	fastPolling(t)
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":{"code":"ResourceNotFound","message":"not yet"}}`)
+		case 2:
+			fmt.Fprint(w, `{"id":"/req/1","properties":{"status":"PendingProvisioning"}}`)
+		default:
+			fmt.Fprint(w, `{"id":"/req/1","properties":{"status":"Provisioned"}}`)
+		}
+	})
+	sr := &ScheduleRequest{ID: "/req/1", Properties: ScheduleRequestProperties{Status: "Accepted"}}
+	got, err := c.Poll(context.Background(), sr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("a 404 during propagation ended the poll: %v", err)
+	}
+	if got.Properties.Status != StatusProvisioned {
+		t.Errorf("final status = %q", got.Properties.Status)
+	}
+	if calls.Load() != 3 {
+		t.Errorf("made %d reads, want 3", calls.Load())
+	}
+}
+
+func TestPollReportsLastReadErrorWhenBudgetRunsOut(t *testing.T) {
+	// When every read fails until the budget is gone, the caller gets the last
+	// request it saw and the error from the last read that completed, so the
+	// report says what went wrong rather than a bare "still Accepted".
+	fastPolling(t)
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":{"code":"InternalServerError","message":"boom"}}`)
+	})
+	c.MaxRetries = 0
+	sr := &ScheduleRequest{ID: "/req/1", Properties: ScheduleRequestProperties{Status: "Accepted"}}
+	got, err := c.Poll(context.Background(), sr, 50*time.Millisecond)
+	if got != sr {
+		t.Fatalf("the last observed request must come back; got %v", got)
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("want the last read's 500, got %v", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("own-budget exhaustion must not read as an interruption: %v", err)
+	}
+	if calls.Load() < 2 {
+		t.Errorf("made %d reads, want the poll to keep trying within its budget", calls.Load())
+	}
+}
+
+func TestPollForgetsAReadErrorOnceARealReadSucceeds(t *testing.T) {
+	// An error followed by a successful non-terminal read and then a timeout
+	// is a slow request, not a failed one: the error is stale and must not be
+	// reported.
+	fastPolling(t)
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		fmt.Fprint(w, `{"id":"/req/1","properties":{"status":"PendingProvisioning"}}`)
+	})
+	c.MaxRetries = 0
+	sr := &ScheduleRequest{ID: "/req/1", Properties: ScheduleRequestProperties{Status: "Accepted"}}
+	got, err := c.Poll(context.Background(), sr, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("a stale error was reported after a successful read: %v", err)
+	}
+	if got.Properties.Status != "PendingProvisioning" {
+		t.Errorf("status = %q, want the last successful read's", got.Properties.Status)
+	}
+}
+
+func TestPollReturnsCancellationEvenWhileReadsAreFailing(t *testing.T) {
+	// Reads keep failing and the caller interrupts: that is an interruption,
+	// not the last read's error, so the CLI reports it as aborted.
+	fastPolling(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 2 {
+			cancel()
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	c.MaxRetries = 0
+	sr := &ScheduleRequest{ID: "/req/1", Properties: ScheduleRequestProperties{Status: "Accepted"}}
+	got, err := c.Poll(ctx, sr, 5*time.Second)
+	if got != sr || !errors.Is(err, context.Canceled) {
+		t.Fatalf("caller cancellation was masked by a read error: %v, %v", got, err)
 	}
 }
 

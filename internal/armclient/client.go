@@ -45,7 +45,10 @@ type Client struct {
 // tenant takes about 20 seconds; 60 leaves room without hanging a shell.
 const DefaultHTTPTimeout = 60 * time.Second
 
-// New builds a client for one ARM token.
+// New builds the client for one ARM token: that token is the only credential
+// the client will ever send, and hc is wrapped in the origin guard from
+// origin.go so no request built here can leave the ARM host. A nil hc gets a
+// client with [DefaultHTTPTimeout]; an empty host means [DefaultHost].
 func New(host, token string, hc *http.Client) *Client {
 	if host == "" {
 		host = DefaultHost
@@ -77,18 +80,26 @@ func retryableStatus(code int) bool {
 		code == http.StatusGatewayTimeout
 }
 
+// MaxRetryDelay caps the wait before any single retry. A Retry-After header is
+// whatever ARM chose to send, and a value of hours would park the CLI for that
+// long on every attempt; a minute is longer than any throttling window seen on
+// this tenant and short enough that an operator can still tell the tool is
+// alive. The [APIError.RetryAfter] a caller inspects is left as ARM sent it —
+// only the sleep is clamped.
+const MaxRetryDelay = 60 * time.Second
+
 // retryDelay is how long to wait before the next attempt: what ARM asked for
-// when it said, and exponential backoff from one second when it did not.
+// when it said, and exponential backoff from one second when it did not, both
+// clamped to [MaxRetryDelay].
 //
 // It reads the wait off the parsed error rather than the raw header, so the
 // RetryAfter field a caller can inspect is the same value the retry loop
-// actually slept for. They were computed separately before, and the field was
-// never assigned at all.
+// slept for, up to the cap.
 func retryDelay(err *APIError, attempt int) time.Duration {
 	if err != nil && err.HasRetryAfter {
-		return err.RetryAfter
+		return min(err.RetryAfter, MaxRetryDelay)
 	}
-	return time.Duration(1<<attempt) * time.Second
+	return min(time.Duration(1<<attempt)*time.Second, MaxRetryDelay)
 }
 
 // SetToken replaces the bearer token, used after a 401 forces a re-mint.
@@ -98,7 +109,9 @@ func (c *Client) SetToken(token string) {
 	c.token = token
 }
 
-// bearer returns the current token for the Authorization header.
+// bearer returns the token to put in the Authorization header. It takes the
+// mutex because [Client.SetToken] swaps the token when a 401 forces a re-mint
+// while other goroutines are still mid-fan-out and about to read it.
 func (c *Client) bearer() string {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
@@ -118,8 +131,10 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body any) ([]byt
 		if !errors.As(err, &ae) || !retryableStatus(ae.StatusCode) || attempt >= c.MaxRetries {
 			return nil, lastErr
 		}
-		// attempt is only in scope here, so the backoff is computed here —
-		// otherwise every retry without a Retry-After header waits a flat 1s.
+		// The backoff is computed from attempt here, inside the loop, because
+		// that is the only place the attempt number exists: computed anywhere
+		// else, every retry without a Retry-After header would wait the same
+		// first-attempt second.
 		select {
 		case <-ctx.Done():
 			return nil, lastErr
@@ -158,15 +173,33 @@ func (c *Client) doOnce(ctx context.Context, method, rawURL string, body any) ([
 	// The body is fully drained a line below; a close error after that tells us
 	// nothing the read did not already say.
 	defer resp.Body.Close() //nolint:errcheck // see above
-	raw, err := io.ReadAll(resp.Body)
+	// One byte past the cap is read on purpose: it is how an over-long body is
+	// told apart from one that is exactly the cap.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
 	if err != nil {
 		return nil, resp.Header, fmt.Errorf("%s %s: could not read the response: %w", method, redactURL(rawURL), err)
+	}
+	if len(raw) > MaxResponseBytes {
+		return nil, resp.Header, fmt.Errorf(
+			"%s %s: the response is larger than the %d MiB pimctl will read",
+			method, redactURL(rawURL), MaxResponseBytes/mebibyte,
+		)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, resp.Header, ParseAPIError(method, redactURL(rawURL), resp.StatusCode, raw, resp.Header)
 	}
 	return raw, resp.Header, nil
 }
+
+// MaxResponseBytes is the most of one ARM response body [Client.doOnce] will
+// read into memory. The largest document pimctl asks for — a full page of
+// schedule instances — is well under a megabyte, so 32 MiB is far above
+// anything ARM sends and only exists so a misbehaving or misdirected response
+// cannot grow the process without bound.
+const MaxResponseBytes = 32 * mebibyte
+
+// mebibyte is 2^20 bytes, the unit [MaxResponseBytes] is stated and reported in.
+const mebibyte = 1 << 20
 
 // redactURL keeps URLs safe to print. ARM PIM URLs carry no secrets, but the
 // query string is dropped defensively so nothing token-shaped can ever leak.
@@ -512,9 +545,9 @@ func (c *Client) GetRequest(ctx context.Context, id string) (*ScheduleRequest, e
 //
 // ARM does not return a terminal status on the PUT itself — the request lands
 // as Accepted or PendingProvisioning and settles a second or two later — so the
-// first poll dominates the wall time of an activation. A flat three seconds
-// spent that on every role; starting at half a second and backing off finds the
-// same answer sooner without polling harder for long.
+// first poll dominates the wall time of an activation. Starting at half a
+// second catches that settle early; backing off to three seconds keeps a slow
+// request from being polled harder the longer it takes.
 var pollSchedule = []time.Duration{
 	500 * time.Millisecond,
 	time.Second,
@@ -533,8 +566,18 @@ func pollWait(attempt int) time.Duration {
 // Poll re-reads a schedule request until it reaches a terminal status or the
 // timeout expires, bounding poll sleeps, HTTP requests and retry delays together.
 // The last observed request is always returned, even on timeout, so the caller
-// can report "still <status>". Own-budget exhaustion returns no error; cancellation
-// of ctx returns its error, preserving the distinction from user interruption.
+// can report "still <status>".
+//
+// A failed read inside the budget is not the end of the poll: the request was
+// accepted by the PUT, and a read that fails — a connection reset, a 404 while
+// the request is still propagating, a 5xx that outlived the retries — says
+// nothing about the request's fate, so the next [pollWait] is spent and the
+// read is tried again. What comes back when the budget runs out is the last
+// request seen together with the error from the last read that completed, nil
+// if that read succeeded; a read the budget itself cut short is not an
+// observation and reports nothing. Cancellation of ctx returns ctx.Err() at
+// once, preserving the distinction from own-budget exhaustion so the caller
+// can tell an interruption from a request that is merely slow.
 func (c *Client) Poll(ctx context.Context, sr *ScheduleRequest, timeout time.Duration) (*ScheduleRequest, error) {
 	if sr == nil {
 		return nil, errors.New("nothing to poll")
@@ -545,24 +588,37 @@ func (c *Client) Poll(ctx context.Context, sr *ScheduleRequest, timeout time.Dur
 	}
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var lastErr error
 	for attempt := 0; ; attempt++ {
 		select {
 		case <-pollCtx.Done():
-			return last, ctx.Err()
+			return last, pollOutcome(ctx, lastErr)
 		case <-time.After(pollWait(attempt)):
 		}
 		next, err := c.GetRequest(pollCtx, last.ID)
 		if pollCtx.Err() != nil {
-			// Exhausting our own budget is an unfinished request, not an
-			// interruption. Only the caller's cancellation returns an error.
-			return last, ctx.Err()
+			return last, pollOutcome(ctx, lastErr)
 		}
 		if err != nil {
-			return last, err
+			lastErr = err
+			continue
 		}
+		lastErr = nil
 		last = next
 		if IsTerminalStatus(last.Properties.Status) {
 			return last, nil
 		}
 	}
+}
+
+// pollOutcome is the error [Client.Poll] returns when its budget is gone:
+// the caller's own cancellation when ctx is done, because an interruption must
+// never read as a timeout, and otherwise lastErr, the error from the last
+// completed read — nil when that read succeeded and the request is simply not
+// terminal yet.
+func pollOutcome(ctx context.Context, lastErr error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return lastErr
 }
