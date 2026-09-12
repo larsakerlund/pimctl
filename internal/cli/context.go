@@ -151,7 +151,11 @@ func resolveContexts(
 		if len(names) == 0 {
 			return resolution{}, errNoContextsYet
 		}
-		return resolution{Names: names, Source: SourceAllContexts}, nil
+		// Through the same gate as every other source: the names come from
+		// cloudctx's registry rather than from the user, but they reach
+		// cloudctx's argv in the same positions, and [checkContextName] is
+		// what that argv is guarded by.
+		return openable(names, SourceAllContexts)
 	}
 	if bareAz.wanted() {
 		return resolution{Bare: true, Source: SourceAzLogin}, nil

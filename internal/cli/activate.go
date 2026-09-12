@@ -314,7 +314,7 @@ func finishActivation(cmd *cobra.Command, rc *runContext, tty ttyProbe, o *activ
 	// says about scopes it could not read belongs under the table, as a caveat
 	// on the dimming and the UNTIL column, not in the exit code.
 	check.tryGet()
-	reportIncompleteActiveCheck(cmd.ErrOrStderr(), check.failures())
+	reportUnreadScopes(cmd.ErrOrStderr(), rc, "the already-active check", check.failures(), check.unread())
 	return runErr
 }
 
@@ -425,14 +425,26 @@ func (c *activeCheck) wait(timeout time.Duration) bool {
 	return c.landed
 }
 
-// failures returns the scopes the listing could not read, as it reported them,
-// or nil while the listing has not landed: nothing was checked, so nothing was
+// failures returns the errors from the scopes the listing could not read, or
+// nil while the listing has not landed: nothing was checked, so nothing was
 // found wanting.
 func (c *activeCheck) failures() []error {
 	if !c.landed {
 		return nil
 	}
 	return c.res.errs
+}
+
+// unread returns the scopes the listing left unknown — the ones that failed
+// and the ones that ran out of soft deadline — or nil while the listing has
+// not landed. A scope that timed out dims no row and fills no UNTIL column, so
+// it belongs in the note beside the ones that failed outright; which of the
+// two a scope was is [activationScope.Errored].
+func (c *activeCheck) unread() []activationScope {
+	if !c.landed {
+		return nil
+	}
+	return c.res.unconfirmed
 }
 
 // markAlreadyActive marks the rows the slow activation listing says are already
@@ -444,27 +456,6 @@ func markAlreadyActive(selected []row, check *activeCheck) {
 		return
 	}
 	copy(selected, applyActive(slices.Clone(selected), check.res.rows))
-}
-
-// reportIncompleteActiveCheck names on w the scopes the activation listing
-// could not read, one per line under a note saying what that does and does not
-// mean, and prints nothing for an empty list. It goes to stderr so `-o json`
-// stdout stays machine-readable, and after the results table because the
-// table is ARM's per-request answer and this is only a caveat on the dimming
-// and the UNTIL column.
-func reportIncompleteActiveCheck(w io.Writer, errs []error) {
-	if len(errs) == 0 {
-		return
-	}
-	fmt.Fprintf(
-		w,
-		"note: the already-active check could not read %d scope(s); "+
-			"each role's result above is ARM's own answer to its request:\n",
-		len(errs),
-	)
-	for _, err := range errs {
-		fmt.Fprintf(w, "  %v\n", err)
-	}
 }
 
 // needsActiveWindow reports whether any already-active result is missing the

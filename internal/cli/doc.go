@@ -24,7 +24,7 @@
 //	pimctl cache clear     newCacheClearCmd  cachecmd.go  -> runCacheClear
 //	pimctl cache path      newCachePathCmd   cachecmd.go
 //	pimctl logout          newLogoutCmd      cachecmd.go
-//	pimctl version         newVersionCmd     root.go
+//	pimctl version         newVersionCmd     version.go
 //	pimctl help auth       newAuthHelpTopic  root.go
 //
 // `up` and `down` are the primary spellings; `activate` and `deactivate` are the

@@ -84,7 +84,8 @@ use `npx skills add ./ --skill pimctl`.
 
 ## Clear data or uninstall
 
-`pimctl cache clear` removes cached tokens, listings and policies.
+`pimctl cache clear` removes cached tokens, listings, policies and the probed
+cloudctx version.
 `pimctl cache clear --all` also forgets activations recorded on this machine;
 it **does not deactivate roles** and can make the next status under-report them.
 See [stored data](../SECURITY.md#what-pimctl-holds-and-where) for locations.

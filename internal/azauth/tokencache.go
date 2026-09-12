@@ -166,8 +166,8 @@ func ReadTokenCache(context, wantTenant string, margin time.Duration, run Runner
 	return cached, true, nil
 }
 
-// readSecretFile opens path, checks its mode and its directory's mode on the
-// open descriptor, and returns the contents. It returns [ErrCachePermissions]
+// readSecretFile opens path, checks the file's mode on the open descriptor and
+// the containing directory's by path, and returns the contents. It returns [ErrCachePermissions]
 // wrapping the path and mode when the file is wider than [cacheFileMode],
 // [ErrCacheDirPermissions] likewise when the directory is wider than
 // [cacheDirMode], and the underlying error for a file that cannot be opened or

@@ -536,7 +536,10 @@ func TestTransientScopeFailuresAreRetriedToConfirmation(t *testing.T) {
 
 // TestRetryAfterIsHonouredOnAScopeListing: when ARM says how long to wait,
 // pimctl waits that long — no less, so the retry is not itself throttled, and
-// not so much longer that the scope misses its soft deadline.
+// still inside the scope's soft deadline, which [assertConfirmedRole] is what
+// proves: a scope that overran it comes back unconfirmed, and says so, rather
+// than as a wall-clock bound whose slack is whatever the rest of the run left
+// over.
 func TestRetryAfterIsHonouredOnAScopeListing(t *testing.T) {
 	elig := twoLowImpactRoles()[:1]
 	scope := elig[0].Properties.Scope
@@ -553,10 +556,6 @@ func TestRetryAfterIsHonouredOnAScopeListing(t *testing.T) {
 	elapsed := time.Since(start)
 	if elapsed < time.Second {
 		t.Errorf("status answered after %v; a Retry-After of 1 s was not waited for", elapsed)
-	}
-	if elapsed > defaultScopeSoftDeadline {
-		t.Errorf("status took %v; a 1 s Retry-After fits inside the %v soft deadline",
-			elapsed, defaultScopeSoftDeadline)
 	}
 	if n := f.scopeGetCount(scope); n != 2 {
 		t.Errorf("the scope was asked %d time(s), want 2: the 429 and then the answer", n)

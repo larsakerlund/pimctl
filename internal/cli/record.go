@@ -451,6 +451,11 @@ func clearRecords() (entries int, contexts []string, err error) {
 // activations forgotten and adding each file's context to contexts. seen keeps
 // a context from being named twice when it has a record in more than one
 // place. A directory that does not exist holds no records and is not an error.
+//
+// Only "active-*.json" is a record. The lock sidecar beside it shares the
+// prefix and is swept with its record — a lock with nothing left to guard —
+// but is never read or named: put through [contextFromRecordFile] it would
+// print the account digest back at the user as though it were a context.
 func clearRecordsIn(dir string, seen map[string]bool, contexts *[]string) (entries int, err error) {
 	files, readErr := os.ReadDir(dir)
 	if readErr != nil {
@@ -460,7 +465,7 @@ func clearRecordsIn(dir string, seen map[string]bool, contexts *[]string) (entri
 		return 0, readErr
 	}
 	for _, f := range files {
-		if f.IsDir() || !strings.HasPrefix(f.Name(), "active-") {
+		if f.IsDir() || !strings.HasPrefix(f.Name(), "active-") || !strings.HasSuffix(f.Name(), ".json") {
 			continue
 		}
 		path := filepath.Join(dir, f.Name())
@@ -482,6 +487,7 @@ func clearRecordsIn(dir string, seen map[string]bool, contexts *[]string) (entri
 		if err := os.Remove(path); err != nil {
 			return entries, err
 		}
+		store.RemoveQuietly(path + recordLockSuffix)
 	}
 	return entries, nil
 }

@@ -594,8 +594,9 @@ func TestConcurrentRecordWritersLoseNothing(t *testing.T) {
 // from what they read and publish. Every one of them has to do that under the
 // record's lock, or another process's write between its read and its publish
 // is lost. The proof is direct: with the sidecar held, none of them completes
-// until it is let go. flock(2) is held per open file description, so the
-// test's own lock stands in for another process.
+// until it is let go, and what it then leaves on disk is checked, so "the
+// write completed" means the write landed. flock(2) is held per open file
+// description, so the test's own lock stands in for another process.
 func TestEveryRecordWriterWaitsForTheLock(t *testing.T) {
 	owner := testOwner("contoso")
 	end := time.Now().Add(time.Hour)
@@ -608,14 +609,47 @@ func TestEveryRecordWriterWaitsForTheLock(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		write func()
+		// landed is what the record must hold once the writer is let through,
+		// so a write that took the lock and then wrote nothing — or wrote
+		// somewhere else — cannot pass as "it completed".
+		landed func(t *testing.T, path string)
 	}{
-		{"activation", func() { recordActivations([]result{activation}) }},
-		{"tombstone", func() {
-			gone := activation
-			gone.Outcome = OutcomeDeactivated
-			forgetActivations([]result{gone})
-		}},
-		{"reconciliation", func() { reconcileRecord(owner, nil, nil, nil) }},
+		{
+			name:  "activation",
+			write: func() { recordActivations([]result{activation}) },
+			landed: func(t *testing.T, _ string) {
+				t.Helper()
+				if got := readRecord(owner); len(got) != 1 || got[0].Revoked() {
+					t.Errorf("the unblocked write left %+v, want the activation", got)
+				}
+			},
+		},
+		{
+			name: "tombstone",
+			write: func() {
+				gone := activation
+				gone.Outcome = OutcomeDeactivated
+				forgetActivations([]result{gone})
+			},
+			landed: func(t *testing.T, _ string) {
+				t.Helper()
+				if got := readRecord(owner); len(got) != 1 || !got[0].Revoked() {
+					t.Errorf("the unblocked write left %+v, want the tombstone", got)
+				}
+			},
+		},
+		{
+			name:  "reconciliation",
+			write: func() { reconcileRecord(owner, nil, nil, nil) },
+			landed: func(t *testing.T, path string) {
+				t.Helper()
+				// Nothing active and nothing recorded: the record it publishes
+				// is empty, so the file itself is the evidence it wrote one.
+				if _, err := os.Stat(path); err != nil {
+					t.Errorf("the unblocked reconciliation wrote no record: %v", err)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -628,11 +662,17 @@ func TestEveryRecordWriterWaitsForTheLock(t *testing.T) {
 			}
 			unlock := lockRecord(path)
 
+			// started is closed from inside the goroutine, so the window
+			// below measures the writer being blocked rather than the runtime
+			// not having scheduled it yet.
+			started := make(chan struct{})
 			done := make(chan struct{})
 			go func() {
+				close(started)
 				tc.write()
 				close(done)
 			}()
+			<-started
 			select {
 			case <-done:
 				t.Fatal("the write went ahead while another process held the record's lock")
@@ -644,6 +684,7 @@ func TestEveryRecordWriterWaitsForTheLock(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("the write never completed after the lock was released")
 			}
+			tc.landed(t, path)
 		})
 	}
 }

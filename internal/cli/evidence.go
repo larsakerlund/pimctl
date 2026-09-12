@@ -17,11 +17,13 @@ import (
 // its own scopes and role ids, so its requests can go out on the strength of
 // the eligibility rows and the local record alone. The activation listing is
 // the expensive call (a per-scope fan-out of seconds, up to the soft deadline),
-// and it changes only two things for such a run: whether a "no such
+// and it changes only three things for such a run: whether a "no such
 // assignment" answer reads as NOT ACTIVE or as a failure to give up a role
-// that is held, and whether a filter that matched nothing else can still find
-// an activation only the listing knows. So the listing starts in the
-// background and is waited for only at those two points.
+// that is held, whether a filter that matched nothing else can still find an
+// activation only the listing knows, and whether a filter that did match
+// should have matched more. So the listing starts in the background and is
+// waited for only at those three points — the last of them, the widening pass,
+// for the per-scope part of the budget only, through [activeEvidence.remainingOf].
 //
 // The value is shared by the goroutines that submit the requests, so every
 // method is safe for concurrent use; the merge with the record happens once,
@@ -64,7 +66,7 @@ func startActiveEvidence(rc *runContext, scopes []activationScope) *activeEviden
 // waiting for it: one wave of the per-scope fan-out, each call cut at the
 // soft deadline (or the --wait bound when wait is set), plus the step that
 // confirms recorded activations against their own requests. Past that sum the
-// listing has landed unless it is on the tenant-wide fallback, whose 12-20 s
+// listing has landed unless it is on the tenant-wide fallback, whose 11-21 s
 // a request that ARM has already answered does not sit out.
 func listingBudget(tm timeouts, wait bool) time.Duration {
 	scope := tm.scopeSoftDeadline
@@ -88,8 +90,10 @@ func (e *activeEvidence) remainingOf(budget time.Duration) time.Duration {
 }
 
 // candidates returns the rows currently believed held: the record's before
-// the listing lands, the merge afterwards. It never blocks, but does take the
-// listing if it has landed since the last look.
+// the listing lands, the merge afterwards. It never waits for the listing, but
+// does take it if it has landed since the last look — and it takes e.mu, so it
+// blocks behind a concurrent [activeEvidence.wait] for as long as that one
+// waits.
 func (e *activeEvidence) candidates() []activeRow {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -144,7 +148,9 @@ func (e *activeEvidence) merge(res activeResult) {
 // shows t held. It is false while the listing is in flight, whatever the
 // record says: a recorded activation the listing has not caught up with is
 // this machine's own claim, and merge asks its schedule request before
-// counting it. It never blocks; a caller that needs the listing calls wait.
+// counting it. It never waits for the listing itself, but it goes through
+// [activeEvidence.wait] to take one that has landed, so it blocks behind a
+// concurrent waiter; a caller that needs the listing calls wait directly.
 func (e *activeEvidence) held(t target) bool {
 	rows, landed := e.wait(0)
 	if !landed {

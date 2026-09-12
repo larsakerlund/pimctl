@@ -198,7 +198,7 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 	if done, doneErr := nothingToDeactivate(cmd, active, failures); done {
 		return doneErr
 	}
-	targets, selErr := selectTargets(active, o)
+	targets, selErr := selectTargets(active, o, d.tty)
 	if selErr != nil {
 		return selErr
 	}
@@ -400,27 +400,12 @@ func finishDeactivation(
 
 // reportListingGaps names on w the scopes a named run's background listing
 // could not read, under a note saying what that does and does not mean, and
-// prints nothing while the listing has not landed or read everything. It goes
-// after the results table because the table is ARM's per-request answer and
-// this is only a caveat on how a "no such assignment" was read, and to stderr
-// so `-o json` stdout stays machine-readable.
+// prints nothing while the listing has not landed or read everything. The note
+// itself is [reportUnreadScopes], which `up` shares: what a caveat on the
+// listing says should not depend on which command is qualifying it.
 func reportListingGaps(w io.Writer, rc *runContext, ev *activeEvidence) {
 	errs, unconfirmed := ev.gaps()
-	if len(errs)+len(unconfirmed) == 0 {
-		return
-	}
-	fmt.Fprintf(
-		w,
-		"note: the activation listing could not read %d scope(s); "+
-			"each role's result above is ARM's own answer to its request:\n",
-		len(errs)+len(unconfirmed),
-	)
-	for _, err := range errs {
-		fmt.Fprintf(w, "  %v\n", err)
-	}
-	for _, label := range labelScopes(rc, unconfirmed) {
-		fmt.Fprintf(w, "  %s: ARM did not answer within the deadline\n", label)
-	}
+	reportUnreadScopes(w, rc, "the activation listing", errs, unconfirmed)
 }
 
 // readActivations reads Azure and local activation evidence, retaining recorded
@@ -491,8 +476,9 @@ func hasExplicitSelection(o *deactivateOpts) bool {
 
 // selectTargets resolves a bare `down`, `--all` or the interactive picker
 // against what the listing and the record show held. A named selection is
-// resolved by [selectNamedTargets] instead.
-func selectTargets(active []activeRow, o *deactivateOpts) ([]target, error) {
+// resolved by [selectNamedTargets] instead. tty is the run's terminal probe,
+// which the picker's summary line is reported against.
+func selectTargets(active []activeRow, o *deactivateOpts, tty ttyProbe) ([]target, error) {
 	if o.all || o.impliedAll {
 		activeTargets := make([]target, 0, len(active))
 		for _, a := range active {
@@ -500,7 +486,7 @@ func selectTargets(active []activeRow, o *deactivateOpts) ([]target, error) {
 		}
 		return activeTargets, nil
 	}
-	picked, err := selectInteractiveActive(active, multipleActiveContexts(active), scopeLabelerForActive(active))
+	picked, err := selectInteractiveActive(active, multipleActiveContexts(active), scopeLabelerForActive(active), tty)
 	if err != nil {
 		return nil, err
 	}

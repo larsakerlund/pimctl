@@ -148,6 +148,40 @@ func TestCacheClearKeepsTheActivationRecord(t *testing.T) {
 	}
 }
 
+// TestCacheClearAllSweepsTheLockSidecarWithoutNamingIt: the lock beside a
+// record shares its "active-" prefix but holds no entries and belongs to no
+// context. Read as a record it is counted and its name — context plus account
+// digest plus ".json.lock" — is printed back at the user as a cloudctx context.
+func TestCacheClearAllSweepsTheLockSidecarWithoutNamingIt(t *testing.T) {
+	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()}
+	f.install()
+	owner := testOwner("contoso")
+	// updateRecord, not writeRecord: only the production writer takes the lock,
+	// so only it leaves the sidecar this test is about.
+	entry := mkRecordEntry("Cost Management Contributor", "contoso-prod", time.Hour)
+	updateRecord(owner, func(existing []recordEntry) []recordEntry {
+		return mergeEntries(existing, []recordEntry{entry})
+	})
+	path, err := recordPath(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(path + recordLockSuffix); statErr != nil {
+		t.Fatalf("the fixture left no lock sidecar to sweep: %v", statErr)
+	}
+
+	out, _, err := runCmd(t, "cache", "clear", "--all")
+	if err != nil {
+		t.Fatalf("cache clear --all: %v", err)
+	}
+	if !strings.Contains(out, "Forgot 1 activation(s) across contoso.\n") {
+		t.Errorf("the sidecar was counted as a record or named as a context:\n%s", out)
+	}
+	if _, statErr := os.Stat(path + recordLockSuffix); !os.IsNotExist(statErr) {
+		t.Errorf("the lock outlived the record it guards: %v", statErr)
+	}
+}
+
 // TestCacheClearAllNamesEveryContextItForgot: the count comes from the live
 // entries, but the names must come from the files. A record whose activations
 // have all expired still belongs to a context, and reporting only the contexts

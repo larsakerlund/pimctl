@@ -699,25 +699,43 @@ func TestActiveCheckNamesAnUnreadableScopeOnceWheneverItLands(t *testing.T) {
 	})
 }
 
-// TestReportIncompleteActiveCheckIsSilentWhenComplete keeps the note off every
-// run whose listing read cleanly, and names each failed scope when it did not.
-func TestReportIncompleteActiveCheckIsSilentWhenComplete(t *testing.T) {
+// TestReportUnreadScopesIsSilentWhenComplete keeps the note off every run whose
+// listing read cleanly, names each failed scope when it did not, and names a
+// scope that failed exactly once: an errored scope is unconfirmed as well, and
+// counting it twice inflates the number the user is asked to trust while
+// giving one of the two lines the wrong reason.
+func TestReportUnreadScopesIsSilentWhenComplete(t *testing.T) {
+	rc := &runContext{Ctx: context.Background(), Timeouts: defaultTimeouts()}
+	rc.names.learn("/scope/qa", "QA")
+	rc.names.learn("/scope/lz", "Contoso landing zones")
+	rc.names.learn("/scope/slow", "Contoso test")
+
 	var buf bytes.Buffer
-	reportIncompleteActiveCheck(&buf, nil)
+	reportUnreadScopes(&buf, rc, "the already-active check", nil, nil)
 	if buf.Len() != 0 {
 		t.Errorf("a clean listing printed a note: %q", buf.String())
 	}
-	reportIncompleteActiveCheck(&buf, []error{
+	reportUnreadScopes(&buf, rc, "the already-active check", []error{
 		errors.New("listing active roles at QA in contoso: 403"),
 		errors.New("listing active roles at Contoso landing zones in contoso: 403"),
+	}, []activationScope{
+		{Context: "contoso", ID: "/scope/qa", Errored: true},
+		{Context: "contoso", ID: "/scope/lz", Errored: true},
+		{Context: "contoso", ID: "/scope/slow"},
 	})
 	text := buf.String()
-	if !strings.HasPrefix(text, "note: the already-active check could not read 2 scope(s)") {
+	if !strings.HasPrefix(text, "note: the already-active check could not read 3 scope(s)") {
 		t.Errorf("note = %q", text)
 	}
-	for _, scope := range []string{"QA", "Contoso landing zones"} {
+	for _, scope := range []string{"QA", "Contoso landing zones", "Contoso test"} {
 		if !strings.Contains(text, scope) {
 			t.Errorf("note does not name %s: %q", scope, text)
 		}
+	}
+	if n := strings.Count(text, "QA"); n != 1 {
+		t.Errorf("an errored scope was named %d times, want once: %q", n, text)
+	}
+	if !strings.Contains(text, "Contoso test: ARM did not answer within the deadline") {
+		t.Errorf("the scope that simply timed out was not named as such: %q", text)
 	}
 }

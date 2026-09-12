@@ -197,6 +197,25 @@ func TestResolveContextsRefusesNamesThatCannotReachCloudctx(t *testing.T) {
 	}
 }
 
+// TestAllContextsRefusesARegistryNameThatCannotReachCloudctx: --all-contexts
+// takes its names from cloudctx rather than from the user, but they reach
+// `cloudctx exec <name> --` and `cloudctx show <name>` in the same argv
+// position as a -c name, so they go through the same gate.
+func TestAllContextsRefusesARegistryNameThatCannotReachCloudctx(t *testing.T) {
+	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()}
+	f.installContexts([]string{"contoso", "-x"}, nil)
+
+	_, _, err := runCmd(t, "ls", "--all-contexts")
+	if err == nil {
+		t.Fatal("a registry name beginning with a dash reached cloudctx's argv")
+	}
+	for _, want := range []string{string(SourceAllContexts), "option"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+}
+
 func TestDescribeNamesTheSource(t *testing.T) {
 	r := resolution{Names: []string{"contoso"}, Source: SourceEnv}
 	if got := r.Describe(); !strings.Contains(got, "contoso") || !strings.Contains(got, envContext) {

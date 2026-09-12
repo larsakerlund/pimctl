@@ -513,7 +513,7 @@ func TestDownKeyUsageNamesNoValue(t *testing.T) {
 // have cost it. What happens afterwards differs: a filter selection waits out
 // what is left of that deadline, and no longer, in case the listing names an
 // activation nothing on hand did; a preset names its scopes outright, so it
-// waits for nothing and the command itself finishes inside the same bound.
+// waits for nothing and the whole command finishes inside the deadline.
 func TestNamedDownDoesNotWaitForTheListing(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -558,10 +558,17 @@ func TestNamedDownDoesNotWaitForTheListing(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%v: %v\n%s\n%s", args, err, out, stderr)
 			}
-			limit := defaultScopeSoftDeadline / 2
-			if sent := time.Duration(firstPut.Load()); sent == 0 || sent > limit {
-				t.Errorf("the deactivation reached ARM after %v, on a blocked listing (limit %v)", sent, limit)
+			requestLimit := defaultScopeSoftDeadline / 2
+			if sent := time.Duration(firstPut.Load()); sent == 0 || sent > requestLimit {
+				t.Errorf("the deactivation reached ARM after %v, on a blocked listing (limit %v)",
+					sent, requestLimit)
 			}
+			// The command's own bound is the whole soft deadline, not the
+			// halved one the request is measured against: what is claimed here
+			// is that nothing waits out the fan-out, and the rest of the run —
+			// flag parsing, the preset, the session, the policy reads and the
+			// results table — is not request latency.
+			limit := defaultScopeSoftDeadline
 			if tc.widens {
 				// The filter is re-run against the listing once the request is
 				// out, so the command may wait the rest of the deadline — but
@@ -683,12 +690,12 @@ func TestNamedDownFindsAnActivationOnlyTheListingKnows(t *testing.T) {
 	}
 }
 
-// TestNamedDownReadsDoesNotExistAgainstTheListing: a named down no longer
-// reads the listing before it asks ARM, but RoleAssignmentDoesNotExist still
-// means what it always did. When the listing — landing after the request —
-// shows the role held, the answer is propagation: the request is sent once
-// more with that evidence and the second refusal is a failure. When nothing
-// shows the role held, ARM's answer stands and the role is NOT ACTIVE.
+// TestNamedDownReadsDoesNotExistAgainstTheListing: a named down asks ARM
+// before the listing lands, and reads RoleAssignmentDoesNotExist against
+// whatever evidence arrives afterwards. When the listing shows the role held,
+// the answer is propagation: the request is sent once more with that evidence
+// and the second refusal is a failure. When nothing shows the role held, ARM's
+// answer stands and the role is NOT ACTIVE.
 func TestNamedDownReadsDoesNotExistAgainstTheListing(t *testing.T) {
 	a := mkActivated(
 		"Cost Management Contributor",

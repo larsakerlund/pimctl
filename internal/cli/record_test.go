@@ -561,11 +561,43 @@ func TestUpdateRecordKeepsEveryConcurrentEntry(t *testing.T) {
 	}
 }
 
-// TestLockRecordFailureIsSilent: a directory the lock file cannot be created in
-// must not stop the write. The record is re-derivable from ARM, so a command
-// that proceeds unlocked loses at worst one fan-out; one that refuses to write
+// TestLockRecordFailureIsSilent: a sidecar that cannot be created must not
+// stop the write. The record is re-derivable from ARM, so a command that
+// proceeds unlocked loses at worst one fan-out; one that refuses to write
 // would lose the record's whole point.
 func TestLockRecordFailureIsSilent(t *testing.T) {
 	unlock := lockRecord(filepath.Join(t.TempDir(), "no-such-dir", "active.json"))
 	unlock() // must be callable, and a no-op.
+
+	// The claim is about the write, not about lockRecord returning: with the
+	// sidecar's path made unopenable — a symlink into a directory that does
+	// not exist, which O_CREATE will not follow — while the record's own path
+	// stays writable, the activation still has to reach the file.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	owner := testOwner("contoso")
+	path, err := recordPath(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(filepath.Dir(path), "no-such-dir", "x"), path+recordLockSuffix); err != nil {
+		t.Fatal(err)
+	}
+	if unlock := lockRecord(path); unlock == nil {
+		t.Fatal("lockRecord must always return a callable release")
+	} else {
+		unlock()
+	}
+	end := time.Now().Add(time.Hour)
+	recordActivations([]result{{
+		Owner: owner, Context: "contoso", Role: "Cost Management Contributor",
+		Scope:            "/providers/Microsoft.Management/managementGroups/contoso-prod",
+		RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + costGUID,
+		Outcome:          OutcomeActivated, Until: &end,
+	}})
+	if got := readRecord(owner); len(got) != 1 {
+		t.Errorf("the write was refused for want of a lock: %+v", got)
+	}
 }

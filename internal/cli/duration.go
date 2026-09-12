@@ -1,6 +1,6 @@
 // Turning the activation length the user typed with --for into a duration.
 // Capping that duration to each role's own policy maximum happens later, in
-// [BuildPlan].
+// [buildPlan].
 
 package cli
 

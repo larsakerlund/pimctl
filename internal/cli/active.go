@@ -83,6 +83,13 @@ func (s rowState) marker() string {
 type activationScope struct {
 	Context string // session label owning this scope.
 	ID      string // full ARM scope id, empty for a tenant-wide fallback.
+	// Errored says the read of this scope failed with an error that is
+	// reported alongside it, rather than merely missing its deadline. Both
+	// leave the scope's state unknown, so both are unconfirmed; a reporter
+	// that prints the errors already names such a scope, and naming it a
+	// second time as "no answer within the deadline" would both inflate the
+	// count and give the wrong reason.
+	Errored bool
 }
 
 // key identifies a scope without conflating equal management-group names in
@@ -308,7 +315,6 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 	defer tally.mu.Unlock()
 	tally.record(d)
 	if err != nil {
-		tally.unread = append(tally.unread, activationScope{Context: s.Token.Label(), ID: scope})
 		// A scope that timed out, or that ARM is still throttling after the
 		// retries, is *unknown* — not empty. Naming it keeps the difference
 		// visible instead of quietly reporting fewer roles than are held.
@@ -317,10 +323,14 @@ func listActivationsAtScope(ctx context.Context, rc *runContext, s *session, sco
 			// entries as well as printed, and a label here would match no
 			// entry, so every row at an unread scope would silently vanish.
 			// Presentation happens at the point of printing.
+			tally.unread = append(tally.unread, activationScope{Context: s.Token.Label(), ID: scope})
 			return
 		}
 		// One unreadable scope must not sink the rest: the user may simply have
-		// lost access to it since the cache was written.
+		// lost access to it since the cache was written. It is unread all the
+		// same, and marked as carrying its own error so no reporter names it
+		// twice.
+		tally.unread = append(tally.unread, activationScope{Context: s.Token.Label(), ID: scope, Errored: true})
 		tally.errs = append(tally.errs,
 			fmt.Errorf("listing active roles at %s in %s: %w", rc.names.label(scope), s.Token.Label(), err))
 		return
@@ -371,6 +381,12 @@ func listActivations(
 
 	covered := map[string]bool{}
 	for _, scope := range scopes {
+		covered[scope.Context] = true
+	}
+	// A context whose eligibility read failed is already marked unknown, with
+	// the error that says why. A second, reasonless marker for the same context
+	// would have it named twice by everything that reports the gaps.
+	for _, scope := range unconfirmed {
 		covered[scope.Context] = true
 	}
 	for _, s := range rc.Sessions {
@@ -505,7 +521,7 @@ func eligibleScopes(
 			// tenant-wide fallback without a word. The caller decides what
 			// to do with it.
 			errs = append(errs, fmt.Errorf("listing eligible roles in %s: %w", label, err))
-			unknown = append(unknown, activationScope{Context: label})
+			unknown = append(unknown, activationScope{Context: label, Errored: true})
 			continue
 		}
 		cache.Write(s.owner(), elig)
@@ -546,7 +562,7 @@ func listTenantWide(ctx context.Context, sessions []*session) ([]activeRow, []er
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("listing active roles in %s: %w", s.Token.Label(), err))
-				unknown = append(unknown, activationScope{Context: s.Token.Label()})
+				unknown = append(unknown, activationScope{Context: s.Token.Label(), Errored: true})
 				mu.Unlock()
 				return
 			}

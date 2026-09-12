@@ -103,7 +103,8 @@ activated in the portal or by a colleague. That is why it is always reconciled
 and why unconfirmed rows say so. Each entry keeps the request id it came from —
 which is what the propagation check above reads back — and records whether its
 start time came from ARM or from this machine's clock (`startSource`), so a
-reader can tell a fact from an approximation. `pimctl cache clear` removes all of it, and
+reader can tell a fact from an approximation. `pimctl cache clear` removes the
+caches above and leaves the record alone; `--all` removes the record too, and
 `--refresh` bypasses the caches for one run.
 
 
@@ -155,8 +156,8 @@ If ARM rejects a cached token — revoked, or invalidated by a Conditional Acces
 change before its stated expiry — pimctl drops it and retries once with a fresh
 one. A second 401 is a real authorization failure and is reported.
 
-`pimctl cache clear` deletes the cached tokens, role listings and policies —
-everything pimctl can re-derive. It leaves the activation record alone, because
+`pimctl cache clear` deletes the cached tokens, role listings, policies and the
+probed cloudctx version — everything pimctl can re-derive. It leaves the activation record alone, because
 deleting that makes the next `status` under-report roles you are still holding
 until Azure's listing catches up; `pimctl cache clear --all` deletes it too and
 warns. Neither ends your `az` session: run `az logout`, or `cloudctx exec <ctx>

@@ -572,7 +572,10 @@ func pollWait(attempt int) time.Duration {
 // accepted by the PUT, and a read that fails — a connection reset, a 404 while
 // the request is still propagating, a 5xx that outlived the retries — says
 // nothing about the request's fate, so the next [pollWait] is spent and the
-// read is tried again. What comes back when the budget runs out is the last
+// read is tried again. The exception is ARM rejecting the credential, which
+// [credentialRejected] identifies and which returns at once: every later read
+// in the budget would be rejected the same way, and only the caller can mint a
+// replacement. What comes back when the budget runs out is the last
 // request seen together with the error from the last read that completed, nil
 // if that read succeeded; a read the budget itself cut short is not an
 // observation and reports nothing. Cancellation of ctx returns ctx.Err() at
@@ -600,6 +603,9 @@ func (c *Client) Poll(ctx context.Context, sr *ScheduleRequest, timeout time.Dur
 			return last, pollOutcome(ctx, lastErr)
 		}
 		if err != nil {
+			if credentialRejected(err) {
+				return last, err
+			}
 			lastErr = err
 			continue
 		}
@@ -609,6 +615,20 @@ func (c *Client) Poll(ctx context.Context, sr *ScheduleRequest, timeout time.Dur
 			return last, nil
 		}
 	}
+}
+
+// credentialRejected reports whether err is ARM refusing the token rather than
+// failing to answer about the request: a 401, which a cached token that expired
+// mid-poll produces, or a 403. Retrying such a read cannot change the answer,
+// so [Client.Poll] hands it straight back for the caller to re-mint against —
+// spending the whole poll budget on reads ARM rejects identically would turn a
+// one-second refresh into two full budgets of doomed requests per role.
+func credentialRejected(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		return false
+	}
+	return ae.StatusCode == http.StatusUnauthorized || ae.StatusCode == http.StatusForbidden
 }
 
 // pollOutcome is the error [Client.Poll] returns when its budget is gone:

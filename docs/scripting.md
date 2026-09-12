@@ -64,6 +64,12 @@ supported for project operations.
 | 2 | Waiting for an approver; the requested change has not taken effect |
 | 130 | Interrupted; requests already sent may still be in flight |
 
+Re-running `up` while its own earlier request is still undecided exits 1, not 2:
+ARM refuses a second request for a role that already has one open, and that
+refusal is a failure of this run rather than a request of its own waiting on an
+approver. The earlier request is still pending — see `pimctl status` and
+[troubleshooting](troubleshooting.md).
+
 `status` is observational: inactive project requirements alone do not cause a
 failure exit. Check their states before treating the project as ready.
 With `--no-wait`, exit 0 can mean requests were submitted; check their outcomes

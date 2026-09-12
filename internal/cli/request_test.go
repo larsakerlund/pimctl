@@ -422,7 +422,7 @@ func TestApplyRequestErrorRequestExists(t *testing.T) {
 		if res.Outcome != OutcomeFailed || !res.IsFailure() {
 			t.Errorf("%s: outcome = %s, want FAILED", code, res.Outcome)
 		}
-		for _, want := range []string{"request exists", code, "not held", "pimctl status", "pimctl help"} {
+		for _, want := range []string{"request exists", code, "not held", "pimctl status", "withdraw it"} {
 			if !strings.Contains(res.Detail, want) {
 				t.Errorf("%s: detail %q is missing %q", code, res.Detail, want)
 			}

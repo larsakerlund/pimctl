@@ -388,7 +388,8 @@ func applyRequestError(res result, s *session, err error, alreadyActiveUntil *ti
 		// machine has seen granted.
 		res.Outcome = OutcomeFailed
 		res.Detail = fmt.Sprintf(
-			"request exists (%s): an earlier request for this role is still open, so the role is not held — check `pimctl status`, and `pimctl help` for what to do next",
+			"request exists (%s): an earlier request for this role is still open, so the role is not held — "+
+				"check `pimctl status`, then wait for that request to be decided or withdraw it in the portal",
 			ae.Code,
 		)
 	case armclient.KindPolicyValidation:

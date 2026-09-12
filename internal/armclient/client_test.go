@@ -867,6 +867,34 @@ func TestPollRetriesTransientReadErrorsWithinBudget(t *testing.T) {
 	}
 }
 
+func TestPollReturnsARejectedCredentialAtOnce(t *testing.T) {
+	// A 401 is the one read failure retrying cannot fix: only a fresh token
+	// can, and the caller holds it. So the poll hands the error back after the
+	// first rejected read instead of spending its whole budget on reads ARM
+	// rejects identically.
+	fastPolling(t)
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		var calls atomic.Int32
+		c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(status)
+			fmt.Fprint(w, `{"error":{"code":"ExpiredAuthenticationToken","message":"expired"}}`)
+		})
+		sr := &ScheduleRequest{ID: "/req/1", Properties: ScheduleRequestProperties{Status: "Accepted"}}
+		got, err := c.Poll(context.Background(), sr, 5*time.Second)
+		if got != sr {
+			t.Fatalf("%d: the last observed request must come back; got %v", status, got)
+		}
+		var ae *APIError
+		if !errors.As(err, &ae) || ae.StatusCode != status {
+			t.Fatalf("%d: want the rejection itself, got %v", status, err)
+		}
+		if calls.Load() != 1 {
+			t.Errorf("%d: made %d reads, want 1 — a rejected credential is not retried", status, calls.Load())
+		}
+	}
+}
+
 func TestPollReportsLastReadErrorWhenBudgetRunsOut(t *testing.T) {
 	// When every read fails until the budget is gone, the caller gets the last
 	// request it saw and the error from the last read that completed, so the

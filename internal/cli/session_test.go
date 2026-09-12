@@ -635,9 +635,14 @@ func (r *slowMintRunner) run(name string, args ...string) (stdout, stderr []byte
 // TestOpenSessionsWithOpensContextsTogether: each context costs a `cloudctx
 // show` and, cold, a mint, and `--all-contexts` over N of them one after
 // another waits N times that. Three contexts whose mints each take 100 ms have
-// to open in well under 300 ms, which means at once — and still come out, with
-// their failures and their --debug lines, in the order they were named rather
-// than the order the mints happened to finish.
+// to be in flight at the same moment — and still come out, with their failures
+// and their --debug lines, in the order they were named rather than the order
+// the mints happened to finish.
+//
+// The proof is the peak count the runner keeps under its own mutex, not the
+// wall clock: a bound equal to the serial total leaves the whole margin to
+// process startup, five `cloudctx show` round trips and five token-cache
+// writes under -race, and fails on a loaded runner against correct code.
 func TestOpenSessionsWithOpensContextsTogether(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	installFakeRunner(t, []string{"alpha", "beta", "gamma"})
@@ -653,14 +658,14 @@ func TestOpenSessionsWithOpensContextsTogether(t *testing.T) {
 	if err != nil {
 		t.Fatalf("three good contexts must open: %v", err)
 	}
-	if elapsed >= 300*time.Millisecond {
-		t.Errorf("opening three contexts took %v, which is one after another, not together", elapsed)
-	}
 	runner.mu.Lock()
 	peak, mints := runner.peak, runner.mints
 	runner.mu.Unlock()
-	if peak < 2 {
-		t.Errorf("no two mints ever ran at once; the contexts were opened one after another")
+	// Three is the floor, not two: the two broken contexts answer before the
+	// sleep, so only the three good mints can overlap, and opened together all
+	// three are in flight at once.
+	if peak < 3 {
+		t.Errorf("at most %d mints ever ran at once; the contexts were opened one after another", peak)
 	}
 	if mints != len(names) {
 		t.Errorf("minted %d times for %d contexts", mints, len(names))
