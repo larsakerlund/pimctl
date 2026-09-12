@@ -1,10 +1,11 @@
 // Fixture and assertion helpers shared by the command tests: JSON probing,
-// the fake cloudctx runner, token fixtures and the deadline overrides. The
-// fake ARM itself is in fake_test.go.
+// the fake cloudctx runner, token fixtures, the deadline overrides and the
+// pinned terminal probes. The fake ARM itself is in fake_test.go.
 
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -214,6 +215,41 @@ func readTokenCache(t *testing.T, context string) *azauth.Token {
 		t.Fatalf("ReadTokenCache(%q): %v", context, err)
 	}
 	return tok
+}
+
+// noTTY is the pinned terminal probe for the non-interactive branches: no
+// stream is a terminal. A test that asks the host whether it is on a terminal
+// passes on a developer's machine and fails under CI, or the other way round,
+// so a test hands the answer in, and [ttyOn] is the other answer.
+func noTTY() ttyProbe { return ttyProbe{} }
+
+// ttyOn is a terminal probe with the chosen streams reporting a terminal, for
+// the interactive branches: an instant status table with a correction after it,
+// streamed per-role lines, a plan that may be confirmed.
+func ttyOn(stdin, stdout, stderr bool) ttyProbe {
+	return ttyProbe{
+		stdin:  func() bool { return stdin },
+		stdout: func() bool { return stdout },
+		stderr: func() bool { return stderr },
+	}
+}
+
+// runCmdOn is [runCmd] for a tree whose terminal probe is tty rather than the
+// process's own streams. Both outputs land in one buffer, in the order they
+// were written, so a test can assert that the instant table came before the
+// correction that followed it: the two go to different streams, and separate
+// buffers would lose the interleaving.
+func runCmdOn(t *testing.T, tty ttyProbe, args ...string) (combined string, err error) {
+	t.Helper()
+	d := testDeps()
+	d.tty = tty
+	root := newRootCmd(d)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs(args)
+	err = root.Execute()
+	return out.String(), err
 }
 
 // shortDeadlines collapses both per-scope deadlines so a test does not sit out

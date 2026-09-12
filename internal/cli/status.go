@@ -67,13 +67,13 @@ blocking read anywhere.`,
 			}
 			// A caller that cannot see a later correction gets the thorough
 			// read: the snappiness budget is for the interactive path.
-			rc.Wait = wait || (!fast && (!term.StdoutIsTTY() || opts.json()))
+			rc.Wait = wait || (!fast && (!d.tty.stdoutIsTTY() || opts.json()))
 			defer rc.finish(cmd)
 			if p != nil {
-				return runProjectStatus(cmd, rc, p, fast, wait)
+				return runProjectStatus(cmd, rc, d.tty, p, fast, wait)
 			}
 
-			_, listErrs := runStatus(cmd, rc, fast, wait)
+			_, listErrs := runStatus(cmd, rc, d.tty, fast, wait)
 			if abortedEarly(cmd.Context()) {
 				return cmd.Context().Err()
 			}
@@ -94,12 +94,14 @@ blocking read anywhere.`,
 }
 
 // runStatus decides between the instant local answer and the authoritative one,
-// and does the reconciliation reporting.
-func runStatus(cmd *cobra.Command, rc *runContext, fast, wait bool) ([]activeRow, []error) {
+// and does the reconciliation reporting. tty says whether stdout is a terminal,
+// which is what makes the instant answer safe to print: a correction can still
+// reach the reader.
+func runStatus(cmd *cobra.Command, rc *runContext, tty ttyProbe, fast, wait bool) ([]activeRow, []error) {
 	// Anything not going to a terminal has one chance to be right: a reader
 	// cannot see a correction printed a second later. So piped output and JSON
 	// wait for Azure unless --fast says otherwise.
-	interactive := term.StdoutIsTTY() && !rc.Opts.json()
+	interactive := tty.stdoutIsTTY() && !rc.Opts.json()
 	blocking := wait || !interactive && !fast
 
 	if blocking {

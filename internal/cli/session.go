@@ -55,22 +55,6 @@ func labelOf(name string) string {
 // for one command tree instead of for the process.
 type sessionOpener func(res resolution, t *timings, refresh bool) ([]*session, []error, error)
 
-// deps are the collaborators a command tree uses, injected at construction.
-//
-// There is one of them today. It is a struct rather than a bare function
-// parameter because the next seam should join it here instead of becoming a
-// second package variable, which is what these were before.
-type deps struct {
-	openSessions sessionOpener // defaults to [openSessionsWith]; replaced in tests.
-	timeouts     timeouts      // the run's time budgets; shortened in tests.
-}
-
-// defaultDeps is what [NewRootCmd] uses: the real ARM-backed opener and the
-// production time budgets.
-func defaultDeps() deps {
-	return deps{openSessions: openSessionsWith, timeouts: defaultTimeouts()}
-}
-
 // openSessionsWith mints one ARM token per context.
 //
 // A context that cannot produce a token does not abort the others: its error is
