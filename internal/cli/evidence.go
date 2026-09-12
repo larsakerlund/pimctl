@@ -74,9 +74,17 @@ func listingBudget(tm timeouts, wait bool) time.Duration {
 	return scope + tm.verify
 }
 
-// remaining is what is left of the budget, never negative.
+// remaining is what is left of the listing's own budget, never negative.
 func (e *activeEvidence) remaining() time.Duration {
-	return max(0, e.budget-time.Since(e.started))
+	return e.remainingOf(e.budget)
+}
+
+// remainingOf is what is left of budget, measured from the moment the listing
+// started and never negative. A caller that may wait for only part of the
+// listing's budget — the widening pass, which has the per-scope soft deadline
+// and not the confirmation step on top of it — names its own.
+func (e *activeEvidence) remainingOf(budget time.Duration) time.Duration {
+	return max(0, budget-time.Since(e.started))
 }
 
 // candidates returns the rows currently believed held: the record's before

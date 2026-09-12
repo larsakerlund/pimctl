@@ -509,25 +509,36 @@ func TestDownKeyUsageNamesNoValue(t *testing.T) {
 // TestNamedDownDoesNotWaitForTheListing: a named selection carries its own
 // scopes and role ids, so its requests go out on the eligibility rows and the
 // record alone. With every per-scope listing blocked for the whole run, the
-// command still finishes well inside the soft deadline the listing would
-// have cost it.
+// request still reaches ARM well inside the soft deadline the listing would
+// have cost it. What happens afterwards differs: a filter selection waits out
+// what is left of that deadline, and no longer, in case the listing names an
+// activation nothing on hand did; a preset names its scopes outright, so it
+// waits for nothing and the command itself finishes inside the same bound.
 func TestNamedDownDoesNotWaitForTheListing(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
+		name   string
+		args   []string
+		widens bool // whether the selection is one the listing could add to.
 	}{
-		{"role", []string{"--role", "Cost Management Contributor"}},
-		{"preset", []string{"daily"}},
+		{"role", []string{"--role", "Cost Management Contributor"}, true},
+		{"preset", []string{"daily"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeARM{t: t, eligibilities: twoLowImpactRoles(), putStatus: "Revoked"}
 			f.install()
 			writePreset(t, "daily", "contoso")
 			base := f.srv
+			// startedAt and firstPut time the request rather than the command:
+			// what a named down promises is that the fan-out is not on the way
+			// to ARM, which is true whatever it does with the answer after.
+			var startedAt, firstPut atomic.Int64
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/roleAssignmentScheduleInstances") {
 					<-r.Context().Done()
 					return
+				}
+				if r.Method == http.MethodPut {
+					firstPut.CompareAndSwap(0, time.Now().UnixNano()-startedAt.Load())
 				}
 				base.Config.Handler.ServeHTTP(w, r)
 			}))
@@ -540,22 +551,89 @@ func TestNamedDownDoesNotWaitForTheListing(t *testing.T) {
 			})
 
 			start := time.Now()
+			startedAt.Store(start.UnixNano())
 			args := append([]string{"down", "-c", "contoso", "-y"}, tc.args...)
 			out, stderr, err := runCmd(t, args...)
 			elapsed := time.Since(start)
 			if err != nil {
 				t.Fatalf("%v: %v\n%s\n%s", args, err, out, stderr)
 			}
-			if limit := defaultScopeSoftDeadline / 2; elapsed > limit {
+			limit := defaultScopeSoftDeadline / 2
+			if sent := time.Duration(firstPut.Load()); sent == 0 || sent > limit {
+				t.Errorf("the deactivation reached ARM after %v, on a blocked listing (limit %v)", sent, limit)
+			}
+			if tc.widens {
+				// The filter is re-run against the listing once the request is
+				// out, so the command may wait the rest of the deadline — but
+				// not past it.
+				limit = defaultScopeSoftDeadline + time.Second
+			}
+			if elapsed > limit {
 				t.Errorf("a named down waited %v on the blocked listing (limit %v)", elapsed, limit)
 			}
 			if len(f.putBodies()) != 1 || !strings.Contains(out, "DEACTIVATED") {
 				t.Errorf("sent %d requests; results:\n%s", len(f.putBodies()), out)
 			}
-			if strings.Contains(stderr, "could not read") {
+			// A selection that widens gives the listing the rest of its own
+			// deadline, which is the moment the blocked scopes are given up on
+			// too, so whether their names make it into the note is a race and
+			// not something to pin. A preset never looks.
+			if !tc.widens && strings.Contains(stderr, "could not read") {
 				t.Errorf("a listing that never landed was reported as read:\n%s", stderr)
 			}
 		})
+	}
+}
+
+// TestNamedDownWidensToAnActivationOnlyTheListingKnows: `up --at` from another
+// machine leaves an activation at a narrower scope than the eligibility, which
+// this machine's record cannot know. --role matches the eligibility at once and
+// the request for it goes out, and the same filter is then re-run against the
+// listing, which names the resource-group activation as well — both are given
+// up, and both are reported.
+func TestNamedDownWidensToAnActivationOnlyTheListingKnows(t *testing.T) {
+	at := testProjectSubscription + "/resourceGroups/app-rg"
+	e := mkElig("Reader", testProjectRole, testProjectSubscription, "Dev", "Subscription")
+	a := mkActivated("Reader", testProjectRole, at, "app-rg", time.Now().Add(time.Hour))
+	a.ID = at + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances/1"
+	// Qualified at the activation scope, as ARM's per-scope listing reports it.
+	a.Properties.RoleDefinitionID = at + "/providers/Microsoft.Authorization/roleDefinitions/" + testProjectRole
+	f := &fakeARM{
+		t:             t,
+		eligibilities: []armclient.Eligibility{e},
+		activated:     []armclient.Assignment{a},
+		putStatus:     "Revoked",
+		// The listing lands after the requests have gone out, which is the
+		// order this exists to cover.
+		activeDelay: 300 * time.Millisecond,
+	}
+	f.install()
+
+	out, stderr, err := runCmd(t, "down", "-c", "contoso", "-y", "--no-wait", "--role", "Reader")
+	if err != nil {
+		t.Fatalf("down --role Reader: %v\n%s\n%s", err, out, stderr)
+	}
+	got := make([]string, 0, 2)
+	for _, body := range f.putBodies() {
+		props := mustObject(t, body, "properties")
+		if props["requestType"] != "SelfDeactivate" {
+			t.Fatalf("requestType = %v", props["requestType"])
+		}
+		id := mustText(t, props, "roleDefinitionId")
+		scope, _, ok := strings.Cut(id, "/providers/Microsoft.Authorization/roleDefinitions/")
+		if !ok {
+			t.Fatalf("roleDefinitionId not qualified to a scope: %s", id)
+		}
+		got = append(got, scope)
+	}
+	slices.Sort(got)
+	want := []string{at, testProjectSubscription}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("deactivated at %v, want %v\n%s", got, want, out)
+	}
+	if n := strings.Count(out, "DEACTIVATED"); n != 2 {
+		t.Errorf("the results table reported %d deactivations, want 2:\n%s", n, out)
 	}
 }
 

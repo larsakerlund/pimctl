@@ -140,17 +140,18 @@ func addDeactivateFlags(cmd *cobra.Command, o *deactivateOpts) {
 }
 
 // checkDeactivateFlags rejects the flag combinations that cannot work without a
-// terminal, before any network call.
-func checkDeactivateFlags(o *deactivateOpts) error {
+// terminal, before any network call. tty is the run's terminal probe, so a test
+// decides what stdin is without touching the process's own descriptors.
+func checkDeactivateFlags(o *deactivateOpts, tty ttyProbe) error {
 	if err := checkSelectionFlags(o.all, o.preset, o.roles, o.scopes, o.keys); err != nil {
 		return err
 	}
 	hasSelection := o.projectOpts.selected() || o.all || o.impliedAll || o.preset != "" ||
 		len(o.roles) > 0 || len(o.scopes) > 0 || len(o.keys) > 0
-	if !hasSelection && !term.StdinIsTTY() {
+	if !hasSelection && !tty.stdinIsTTY() {
 		return errNoTTY("role selection")
 	}
-	if !o.yes && !term.StdinIsTTY() {
+	if !o.yes && !tty.stdinIsTTY() {
 		return errNoConfirmTTY
 	}
 	return nil
@@ -172,7 +173,7 @@ func checkDeactivateFlags(o *deactivateOpts) error {
 // activation record as it does, so an interrupt partway through still leaves
 // behind what actually happened.
 func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOpts) error {
-	project, presetEntries, err := prepareDeactivation(cmd, opts, o)
+	project, presetEntries, err := prepareDeactivation(cmd, opts, d.tty, o)
 	if err != nil {
 		return err
 	}
@@ -187,7 +188,7 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 		return err
 	}
 	if project != nil || hasExplicitSelection(o) {
-		return runNamedDeactivation(cmd, rc, o, presetEntries, selectedScopes)
+		return runNamedDeactivation(cmd, rc, d.tty, o, presetEntries, selectedScopes)
 	}
 	ctx := rc.Ctx
 	active, failures, err := readActivations(ctx, cmd, rc, selectedScopes)
@@ -207,7 +208,7 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 	if sessErr := attachSessions(targets, rc.Sessions); sessErr != nil {
 		return sessErr
 	}
-	return finishDeactivation(cmd, rc, o, targets, active, failures, nil)
+	return finishDeactivation(cmd, rc, d.tty, o, targets, active, failures, nil)
 }
 
 // runNamedDeactivation is the named half of [runDeactivate]: the listing
@@ -215,24 +216,28 @@ func runDeactivate(cmd *cobra.Command, opts *globalOpts, d deps, o *deactivateOp
 // rows and the local record, and the requests go out without waiting for it.
 //
 // The listing costs a per-scope fan-out of seconds, and for a named selection
-// it changes only two things: how a "no such assignment" answer reads, and
+// it changes only three things: how a "no such assignment" answer reads,
 // whether a filter that matched nothing else can still find an activation the
-// record does not have. Both are handled where they arise — the first in
-// [activeEvidence.deactivate], the second in [selectNamedTargets] — so the
-// common run, where every named role is one this machine activated, pays for
-// no listing at all. Its failures are therefore not the run's: each role's
-// outcome is ARM's answer to its own request, and a scope the listing could
-// not read is noted under the results if the listing has landed by then.
+// record does not have, and whether a filter that did match should have
+// matched more. Each is handled where it arises — the first in
+// [activeEvidence.deactivate], the second in [selectNamedTargets], the third
+// in [namedRun.widened] once the first requests are on the wire — so the
+// common run, where every named role is one this machine activated, waits for
+// the listing only after it has already asked ARM to give the roles up. Its
+// failures are therefore not the run's: each role's outcome is ARM's answer to
+// its own request, and a scope the listing could not read is noted under the
+// results if the listing has landed by then.
 func runNamedDeactivation(
 	cmd *cobra.Command,
 	rc *runContext,
+	tty ttyProbe,
 	o *deactivateOpts,
 	presetEntries []config.PresetEntry,
 	scopes []activationScope,
 ) error {
 	ev := startActiveEvidence(rc, scopes)
 	reportContextFailures(cmd.ErrOrStderr(), rc.Failures)
-	targets, err := selectNamedTargets(cmd, rc, o, presetEntries, ev)
+	targets, widen, err := selectNamedTargets(cmd, rc, o, presetEntries, ev)
 	if err != nil {
 		return err
 	}
@@ -242,28 +247,119 @@ func runNamedDeactivation(
 	if sessErr := attachSessions(targets, rc.Sessions); sessErr != nil {
 		return sessErr
 	}
-	return finishDeactivation(cmd, rc, o, targets, ev.candidates(), rc.Failures, ev)
+	named := &namedRun{ev: ev, widen: widen}
+	return finishDeactivation(cmd, rc, tty, o, targets, ev.candidates(), rc.Failures, named)
+}
+
+// namedRun is what a named deactivation carries past the point of selection:
+// the evidence each ARM answer is read against, and the second pass that
+// re-runs the selection against the activation listing once the first requests
+// have gone out. A run that read the listing up front has neither.
+type namedRun struct {
+	ev *activeEvidence // the record now, the listing when it lands.
+	// widen re-runs the selection against the listing's rows; nil for a preset
+	// or --project selection, which names its scopes and role ids outright and
+	// so has nothing the listing could add to.
+	widen widenFunc
+}
+
+// widenFunc re-runs a named selection over the rows the activation listing
+// found and returns every target they match, the ones already requested
+// included; the caller drops those. It returns nothing rather than an error
+// when the listing makes the selection ambiguous: the requests it would
+// explain have already been sent.
+type widenFunc func(active []activeRow) []target
+
+// widened submits the targets the activation listing adds to a named
+// selection, once the first round of requests has been sent, and returns their
+// results in the order they were submitted. Nothing is submitted twice: a
+// target already requested is dropped by [target.key], as is one whose context
+// has no session in this run.
+//
+// An activation only the listing knows — one made at a narrower scope from
+// another machine, say — matches the same --role, --scope or --key the user
+// gave, but no eligibility row and no local record carries it, so the first
+// round leaves it held. Waiting for the listing before sending anything would
+// cost every named run the fan-out it is meant to skip, so the wait happens
+// here: the requests already sent take about two seconds, which is most of the
+// per-scope soft deadline the listing has to land within, and what is left of
+// that deadline is all it gets. A listing that does not land within it adds
+// nothing; one that lands having missed a scope adds what it did read, and the
+// scope it did not is named under the results. An interrupted run widens by
+// nothing: the roles it has already asked for are the whole of what it did.
+func (n *namedRun) widened(
+	ctx context.Context,
+	rc *runContext,
+	o *deactivateOpts,
+	requested []target,
+	progress func(result),
+) []result {
+	if n.widen == nil || abortedEarly(ctx) {
+		return nil
+	}
+	rows, landed := n.ev.wait(n.ev.remainingOf(rc.Timeouts.scopeSoftDeadline))
+	if !landed || abortedEarly(ctx) {
+		return nil
+	}
+	extra := unrequestedTargets(n.widen(rows), requested, rc.Sessions)
+	if len(extra) == 0 {
+		return nil
+	}
+	return submitAll(extra, progress, func(t target) result {
+		return n.ev.deactivate(ctx, t, o.noWait, rc.Timeouts.poll)
+	})
+}
+
+// unrequestedTargets keeps the matched targets that have not been requested
+// already, and gives each one the session for its context. A target whose
+// context has no session is dropped rather than reported: it is not one this
+// run could have sent a request for in the first place.
+func unrequestedTargets(matched, requested []target, sessions []*session) []target {
+	seen := make(map[string]bool, len(requested))
+	for _, t := range requested {
+		seen[t.key()] = true
+	}
+	out := make([]target, 0, len(matched))
+	for _, t := range matched {
+		if seen[t.key()] {
+			continue
+		}
+		if t.Session == nil {
+			t.Session = sessionFor(sessions, t.Context)
+		}
+		if t.Session == nil {
+			continue
+		}
+		seen[t.key()] = true
+		out = append(out, t)
+	}
+	return out
 }
 
 // finishDeactivation confirms and executes resolved targets, preserving ordinary
 // deactivation result reporting and per-role activation-record updates.
 //
-// ev is the evidence a named run reads ARM's answers against, and nil for a
-// run that read the listing up front; see [activeEvidence.deactivate].
+// named is the evidence a named run reads ARM's answers against together with
+// its widening pass, and nil for a run that read the listing up front; see
+// [activeEvidence.deactivate] and [namedRun.widened]. The roles the widening
+// pass adds are submitted under the confirmation already given — it is the
+// same selection, answered from a source that had not arrived yet — and are
+// reported in the same table.
 func finishDeactivation(
 	cmd *cobra.Command,
 	rc *runContext,
+	tty ttyProbe,
 	o *deactivateOpts,
 	targets []target,
 	active []activeRow,
 	failures []error,
-	ev *activeEvidence,
+	named *namedRun,
 ) error {
 	ctx, opts := rc.Ctx, rc.Opts
 	multi := len(rc.Sessions) > 1
 	scopes := deactivateScopeLabeler(targets, active)
 
-	proceed, err := confirmPlan(cmd, opts, confirmOpts{
+	proceed, err := confirmPlanWith(cmd, opts, tty, confirmOpts{
 		Yes: o.yes,
 		// A bare `down` is the end-of-task gesture and still asks, because
 		// nothing was picked by hand.
@@ -279,24 +375,25 @@ func finishDeactivation(
 	}
 
 	sp := term.NewSpinner(cmd.ErrOrStderr(), fmt.Sprintf("deactivating %s…", roleCount(len(targets))))
-	stream := streamProgress(cmd, opts, len(targets), sp, scopes)
+	stream := streamProgressWith(cmd, opts, tty, len(targets), sp, scopes)
 	var results []result
-	if ev == nil {
+	if named == nil {
 		results = executeDeactivations(ctx, targets, o.noWait, rc.Timeouts.poll, onEachResult(stream))
 	} else {
 		// The same runner, bound and ordering as executeDeactivations; only
 		// the per-item call differs, in how it reads a "no such assignment".
 		results = submitAll(targets, onEachResult(stream), func(t target) result {
-			return ev.deactivate(ctx, t, o.noWait, rc.Timeouts.poll)
+			return named.ev.deactivate(ctx, t, o.noWait, rc.Timeouts.poll)
 		})
+		results = append(results, named.widened(ctx, rc, o, targets, onEachResult(stream))...)
 	}
 	sp.Stop()
 	// Requests have already been sent to ARM, so nothing below may return
 	// early — the user must always see which roles landed and the right exit
 	// code.
-	runErr := reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
-	if ev != nil {
-		reportListingGaps(cmd.ErrOrStderr(), rc, ev)
+	runErr := reportRun(cmd, opts, results, failures, multi, streamedToWith(stream, tty), scopes)
+	if named != nil {
+		reportListingGaps(cmd.ErrOrStderr(), rc, named.ev)
 	}
 	return runErr
 }
@@ -415,7 +512,10 @@ func selectTargets(active []activeRow, o *deactivateOpts) ([]target, error) {
 }
 
 // selectNamedTargets resolves a preset, --project, --role, --scope or --key
-// selection without waiting for the activation listing.
+// selection without waiting for the activation listing. It returns the targets
+// to submit now and, for a filter selection, the [widenFunc] that answers the
+// same filter again once the listing has landed; for a preset or --project the
+// widening is nil, there being no filter to re-run.
 //
 // A named selection does not trust the activation listing. ARM has been
 // observed dropping genuinely-active roles from both
@@ -431,8 +531,12 @@ func selectTargets(active []activeRow, o *deactivateOpts) ([]target, error) {
 // record, both of which are on hand. What the record holds is merged into the
 // targets so their session and window come along, and so a "no such
 // assignment" for a role this machine saw held reads as propagation. The
-// listing is waited for only when the filters matched nothing, in case the
-// activation they name is one the record does not have — see [withActiveRows].
+// listing is waited for here only when the filters matched nothing at all, in
+// case the activation they name is one the record does not have — see
+// [withActiveRows]; when they matched something, the same match is re-run
+// against the listing after the requests have gone out, which is what the
+// returned widening is for.
+//
 // It returns selectByKeys' refusal of a key that matches nothing or too much.
 func selectNamedTargets(
 	cmd *cobra.Command,
@@ -440,14 +544,14 @@ func selectNamedTargets(
 	o *deactivateOpts,
 	presetEntries []config.PresetEntry,
 	ev *activeEvidence,
-) ([]target, error) {
+) ([]target, widenFunc, error) {
 	if o.preset != "" || o.projectOpts.selected() {
 		// A preset carries scope and role id, so it needs no listing at all.
 		selected := make([]target, 0, len(presetEntries))
 		for _, e := range presetEntries {
 			selected = append(selected, targetFromPreset(e))
 		}
-		return mergeTargets(selected, evidenceTargets(ev.candidates())), nil
+		return mergeTargets(selected, evidenceTargets(ev.candidates())), nil, nil
 	}
 
 	// Match against eligibility, which is cached and complete, plus every
@@ -456,31 +560,48 @@ func selectNamedTargets(
 	if len(listErrs) > 0 {
 		reportContextFailures(cmd.ErrOrStderr(), listErrs)
 	}
-	chosen, report, err := matchNamedRows(withActiveRows(rows, ev.candidates()), o)
-	if len(chosen) == 0 {
+	// The same match the widening re-runs later, over whatever evidence the
+	// caller hands it, so the two passes cannot read one filter differently.
+	match := func(active []activeRow) ([]target, string, error) {
+		chosen, report, err := matchNamedRows(withActiveRows(rows, active), o)
+		selected := make([]target, 0, len(chosen))
+		for _, r := range chosen {
+			selected = append(selected, targetFromEligible(r))
+		}
+		return mergeTargets(selected, evidenceTargets(active)), report, err
+	}
+	selected, report, err := match(ev.candidates())
+	if len(selected) == 0 {
 		// Nothing on hand matches. The activation named may be one only the
 		// listing knows — made at a narrower scope from another machine, say
-		// — so this is the one place a named run waits for it, and the match
-		// is answered from the listing as a bare `down` would have read it.
+		// — so this is the one place a named run waits for it before sending
+		// anything, and the match is answered from the listing as a bare
+		// `down` would have read it.
 		sp := term.NewSpinner(cmd.ErrOrStderr(), "reading active roles…")
 		active, _ := ev.wait(-1)
 		sp.Stop()
 		if abortedEarly(rc.Ctx) {
-			return nil, rc.Ctx.Err()
+			return nil, nil, rc.Ctx.Err()
 		}
-		chosen, report, err = matchNamedRows(withActiveRows(rows, active), o)
+		selected, report, err = match(active)
 	}
 	if report != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), report)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	selected := make([]target, 0, len(chosen))
-	for _, r := range chosen {
-		selected = append(selected, targetFromEligible(r))
+	widen := func(active []activeRow) []target {
+		// A listing can also make a --key ambiguous, which is a refusal there
+		// is no longer anything to refuse: the requests it would have
+		// explained have already been sent. Widen by nothing instead.
+		widened, _, matchErr := match(active)
+		if matchErr != nil {
+			return nil
+		}
+		return widened
 	}
-	return mergeTargets(selected, evidenceTargets(ev.candidates())), nil
+	return selected, widen, nil
 }
 
 // matchNamedRows applies --key, or --role and --scope, to rows. report is the
@@ -600,6 +721,7 @@ func projectDeactivation(
 func prepareDeactivation(
 	cmd *cobra.Command,
 	opts *globalOpts,
+	tty ttyProbe,
 	o *deactivateOpts,
 ) (*config.Project, []config.PresetEntry, error) {
 	if err := validateFlags(opts); err != nil {
@@ -612,7 +734,7 @@ func prepareDeactivation(
 	if project != nil {
 		o.impliedAll = false
 	}
-	if flagErr := checkDeactivateFlags(o); flagErr != nil {
+	if flagErr := checkDeactivateFlags(o, tty); flagErr != nil {
 		return nil, nil, flagErr
 	}
 	presetEntries, err := presetSelection(

@@ -69,4 +69,10 @@ func TestActiveEvidenceRemainingNeverGoesNegative(t *testing.T) {
 	if got := ev.remaining(); got <= 0 || got > time.Hour {
 		t.Errorf("remaining = %v, want what is left of an hour", got)
 	}
+	if got := ev.remainingOf(time.Minute); got <= 0 || got > time.Minute {
+		t.Errorf("remainingOf a minute = %v, want what is left of it", got)
+	}
+	if got := ev.remainingOf(0); got != 0 {
+		t.Errorf("remainingOf nothing = %v, want 0", got)
+	}
 }
