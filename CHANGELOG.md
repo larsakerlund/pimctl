@@ -50,7 +50,6 @@ inside a context window.
   `pimctl cache clear` removes the probed version along with the other caches.
 - The token's expiry is read from az's epoch `expires_on` when present, so a
   timezone change between runs cannot shift it.
-- `pimctl help auth` describes where the token and the record actually live.
 - Boolean flags no longer render as if they took a value in `--help`.
 - `down PRESET --preset OTHER` is refused the way `up` refuses it.
 
@@ -70,9 +69,6 @@ inside a context window.
 
 ### Changed
 
-- SECURITY.md is now a security policy only: supported versions, how to report
-  privately, and what to expect. Where pimctl keeps files is described by
-  `pimctl help auth` and docs/design.md.
 - `make check` runs the race suite twice, so a test that leaks state into a
   later run fails locally rather than only under `-count=2`.
 - The token cache is refused when its directory is group- or other-accessible,
