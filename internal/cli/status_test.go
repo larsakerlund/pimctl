@@ -7,17 +7,20 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/azauth"
+	"github.com/larsakerlund/pimctl/internal/cache"
 )
 
 func TestStatusEmpty(t *testing.T) {
@@ -29,6 +32,131 @@ func TestStatusEmpty(t *testing.T) {
 	}
 	if !strings.Contains(out, "No roles are currently activated.") {
 		t.Errorf("status output:\n%s", out)
+	}
+}
+
+// TestStatusFastQualifiesTheEmptyRecord: printed from the record before Azure
+// has been asked, "No roles are currently activated." reads as Azure's answer
+// to anyone who keeps only stdout, while the correction lands on stderr. The
+// record's version of the sentence says where it came from and that Azure is
+// still to come; the plain sentence is reserved for the blocking path above.
+func TestStatusFastQualifiesTheEmptyRecord(t *testing.T) {
+	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()}
+	f.install()
+	out, errOut, err := runCmd(t, "status", "-c", "contoso", "--fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "No roles are recorded as activated on this machine; checking Azure…") {
+		t.Errorf("the record's empty table must say it is the record's:\n%s", out)
+	}
+	if strings.Contains(out, "No roles are currently activated.") {
+		t.Errorf("stdout claimed Azure's answer before Azure had given it:\n%s", out)
+	}
+	if !strings.Contains(errOut, "confirmed 0 against Azure") {
+		t.Errorf("the reconciliation must still report on stderr: %q", errOut)
+	}
+	// The sentence itself, both ways round.
+	if emptyStatusLine(false) != "No roles are currently activated." {
+		t.Errorf("Azure's own empty answer changed: %q", emptyStatusLine(false))
+	}
+}
+
+// statusOutput signals when the record-derived table, legend included, has
+// reached stdout. Its buffer is read only after the command has finished.
+type statusOutput struct {
+	bytes.Buffer
+
+	printed chan struct{}
+	once    sync.Once
+}
+
+func (w *statusOutput) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if strings.Contains(w.String(), "? = from this machine's own record") {
+		w.once.Do(func() { close(w.printed) })
+	}
+	return n, err
+}
+
+// TestStatusFromRecordProducesOutputBeforeAnyNetworkCall is the snappiness
+// guarantee for `status`, stated the way list_test.go states it for `ls`: with
+// a warm eligibility cache and a record, the record-derived table — rows marked
+// "?" and the legend saying so — must reach stdout without waiting on ARM. The
+// fake blocks every activation request until released, so any network call on
+// the path to first output hangs the test rather than merely slowing it.
+func TestStatusFromRecordProducesOutputBeforeAnyNetworkCall(t *testing.T) {
+	elig := twoLowImpactRoles()
+	held := armclient.Assignment{ID: "/held-instance"}
+	held.Properties.AssignmentType = "Activated"
+	held.Properties.Scope = elig[0].Properties.Scope
+	held.Properties.RoleDefinitionID = elig[0].Properties.RoleDefinitionID
+	held.Properties.ExpandedProperties = elig[0].Properties.ExpandedProperties
+	end := time.Now().Add(time.Hour)
+	held.Properties.EndDateTime = &end
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/roleEligibilityScheduleInstances") {
+			t.Error("a warm status fetched eligibility")
+			writeJSON(t, w, map[string]any{"value": elig})
+			return
+		}
+		select {
+		case <-release:
+			writeJSON(t, w, map[string]any{"value": []armclient.Assignment{held}})
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	installStatusFake(t, srv)
+	cache.Write(testOwner("contoso"), elig)
+
+	// A role Azure has listed before, so the row is "?" rather than "~" and
+	// nothing needs asking about its schedule request.
+	entry := mkRecordEntry("Cost Management Contributor", scopeLeaf(elig[0].Properties.Scope), time.Hour)
+	entry.RoleDefinitionID = elig[0].Properties.RoleDefinitionID
+	entry.Key = recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID)
+	entry.Listed = true
+	writeRecord(testOwner("contoso"), []recordEntry{entry})
+
+	root := newRootCmd(testDeps())
+	out := &statusOutput{printed: make(chan struct{})}
+	var stderr bytes.Buffer
+	root.SetOut(out)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"status", "-c", "contoso", "--fast"})
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(finished)
+		runErr = root.ExecuteContext(ctx)
+	}()
+	t.Cleanup(func() { cancel(); <-finished })
+	select {
+	case <-out.printed:
+	case <-time.After(time.Second):
+		t.Fatal("status waited for ARM before printing the record-derived table")
+	}
+	select {
+	case <-finished:
+		t.Fatal("status abandoned reconciliation after printing")
+	default:
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("status did not complete reconciliation after ARM answered")
+	}
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if !strings.Contains(out.String(), "Cost Management Contributor") {
+		t.Errorf("the recorded role is missing from the table:\n%s", out.String())
+	}
+	if !strings.Contains(stderr.String(), "confirmed 1 against Azure") {
+		t.Errorf("Azure's agreement must be reported once it arrives: %q", stderr.String())
 	}
 }
 
@@ -94,8 +222,8 @@ func TestStatusUnconfirmedRowsAreMarkedInTheTable(t *testing.T) {
 	cmd.SetOut(&out)
 	printActiveTable(cmd, []activeRow{{Context: "contoso", Assignment: a, State: RowUnconfirmed}})
 
-	if !strings.Contains(out.String(), "?") {
-		t.Errorf("an unconfirmed row must carry a marker:\n%s", out.String())
+	if !strings.Contains(out.String(), "? = from this machine's own record") {
+		t.Errorf("an unconfirmed row must carry a marker and its legend:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "Azure did not answer for that scope") {
 		t.Errorf("the legend is missing:\n%s", out.String())
@@ -200,7 +328,7 @@ func TestUnconfirmedScopeKeepsItsRole(t *testing.T) {
 	if !strings.Contains(out, "Owner") {
 		t.Errorf("the role at the unconfirmed scope was dropped:\n%s", out)
 	}
-	if !strings.Contains(out, "?") {
+	if !strings.Contains(out, "? = from this machine's own record") {
 		t.Errorf("the surviving row must be marked unconfirmed:\n%s", out)
 	}
 	if !strings.Contains(errOut, "contoso-slow") {

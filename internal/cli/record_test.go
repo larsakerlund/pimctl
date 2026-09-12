@@ -1,18 +1,21 @@
-// Tests for record.go: the on-disk round trip, pruning, and what a corrupt or
-// wrong-version file means. Reconciliation against Azure is tested in
-// reconcile_test.go.
+// Tests for record.go and recordlock.go: the on-disk round trip, pruning, what
+// a corrupt, wrong-version or future-stamped file means, and the lock two
+// writers share. Reconciliation against Azure is tested in reconcile_test.go.
 
 package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
+	"github.com/larsakerlund/pimctl/internal/azauth"
 	"github.com/larsakerlund/pimctl/internal/store"
 )
 
@@ -462,4 +465,107 @@ func TestRecordRebuildsLegacyContextFoldedKey(t *testing.T) {
 	if len(entries) != 1 || entries[0].Key != recordKey(entry.Context, entry.Scope, entry.RoleDefinitionID) {
 		t.Fatalf("legacy key was not normalised: %+v", entries)
 	}
+}
+
+// TestFutureWrittenEntryIsStale: an entry stamped later than this machine's
+// clock — a clock stepped back after a `down`, or a record copied from a machine
+// running ahead — can never age past the ceiling, so a tombstone in that state
+// would deny a listed role for as long as the stamp stays ahead. Such an entry
+// is dropped on read, and denies nothing even in memory; a stamp only a little
+// ahead is ordinary drift and is kept.
+func TestFutureWrittenEntryIsStale(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	farAhead := mkRecordEntry("Cost Management Contributor", "contoso-prod", time.Hour)
+	farAhead.Status = recordRevoked
+	farAhead.WrittenAt = time.Now().Add(recordClockTolerance + time.Minute)
+	drift := mkRecordEntry("Owner", "contoso-qa", time.Hour)
+	drift.WrittenAt = time.Now().Add(recordClockTolerance - time.Minute)
+	writeRecordFileForTest(t, "contoso", []recordEntry{farAhead, drift})
+
+	got := readRecord(testOwner("contoso"))
+	if len(got) != 1 || got[0].Role != "Owner" {
+		t.Fatalf("read back %+v, want only the entry within clock tolerance", got)
+	}
+
+	// Denies is the property the read protects: a listing row whose window
+	// opened before the stamp is exactly what a sound tombstone suppresses,
+	// and a future-stamped one must not.
+	listed := armclient.Assignment{}
+	start := time.Now().Add(-time.Hour)
+	listed.Properties.StartDateTime = &start
+	if farAhead.Denies(listed) {
+		t.Error("a tombstone stamped in the future denied a listed activation")
+	}
+	sound := farAhead
+	sound.WrittenAt = time.Now()
+	if !sound.Denies(listed) {
+		t.Error("the same tombstone with a sound stamp must deny the older window")
+	}
+
+	// And through the record: the listed role reaches the table and the
+	// deactivation candidates, where a future-stamped tombstone would hide
+	// a role ARM says is held.
+	row := recordRow("contoso", nil, farAhead)
+	row.Assignment.ID = "/x"
+	row.Assignment.Properties.StartDateTime = &start
+	row.State = RowConfirmed
+	writeRecordFileForTest(t, "contoso", []recordEntry{farAhead})
+	rc := &runContext{Sessions: []*session{{
+		Context: "contoso",
+		Token:   &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1"},
+	}}}
+	local := readLocalRecord(rc)
+	if got := mergeActive(local, []activeRow{row}, nil); len(got) != 1 {
+		t.Errorf("status dropped a listed role behind a future-stamped tombstone: %+v", got)
+	}
+	if got := deactivationCandidates(local, []activeRow{row}); len(got) != 1 {
+		t.Errorf("down would say nothing to deactivate while ARM lists the role: %+v", got)
+	}
+}
+
+// TestUpdateRecordKeepsEveryConcurrentEntry: two writers rewriting one record
+// at the same time each read the old entries, merge their own in and publish;
+// without a lock across the three steps the second publish overwrites the
+// first, and whichever `up` or tombstone landed first is gone. flock(2) is held
+// per open file description, so two goroutines each opening the sidecar stand
+// in for two processes here.
+func TestUpdateRecordKeepsEveryConcurrentEntry(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	owner := testOwner("contoso")
+	const perWriter = 25
+
+	var wg sync.WaitGroup
+	for w := range 2 {
+		wg.Go(func() {
+			for i := range perWriter {
+				fresh := mkRecordEntry("Contributor", fmt.Sprintf("mg-%d-%d", w, i), time.Hour)
+				updateRecord(owner, func(existing []recordEntry) []recordEntry {
+					return mergeEntries(existing, []recordEntry{fresh})
+				})
+			}
+		})
+	}
+	wg.Wait()
+
+	if got := len(readRecord(owner)); got != 2*perWriter {
+		t.Fatalf("the record holds %d entries after %d concurrent writes; one writer overwrote the other",
+			got, 2*perWriter)
+	}
+	path, err := recordPath(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + recordLockSuffix); err != nil {
+		t.Errorf("the lock sidecar should sit next to the record: %v", err)
+	}
+}
+
+// TestLockRecordFailureIsSilent: a directory the lock file cannot be created in
+// must not stop the write. The record is re-derivable from ARM, so a command
+// that proceeds unlocked loses at worst one fan-out; one that refuses to write
+// would lose the record's whole point.
+func TestLockRecordFailureIsSilent(t *testing.T) {
+	unlock := lockRecord(filepath.Join(t.TempDir(), "no-such-dir", "active.json"))
+	unlock() // must be callable, and a no-op.
 }

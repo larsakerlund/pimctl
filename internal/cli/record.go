@@ -71,6 +71,18 @@ const (
 // which is why it decides nothing on its own.
 var recordCeiling = 30 * time.Minute
 
+// recordClockTolerance is how far ahead of this machine's clock an entry's
+// WrittenAt may sit before the entry is disbelieved.
+//
+// WrittenAt is a local clock reading, and a local clock can be stepped back —
+// or the file copied from a machine whose clock ran ahead. An entry stamped
+// later than now never ages: the ceiling measures forward from WrittenAt, so a
+// tombstone stamped in the future would deny a listed role for as long as the
+// stamp stays ahead, and a `down` would then say there is nothing to deactivate
+// while ARM lists the role. Five minutes is well clear of NTP-scale drift and
+// far short of any adjustment a person makes by hand.
+const recordClockTolerance = 5 * time.Minute
+
 // recordEntry is one activation this machine performed.
 type recordEntry struct {
 	Context string `json:"context"` // the cloudctx context the role was activated in.
@@ -118,10 +130,22 @@ func (e recordEntry) Revoked() bool { return e.Status == recordRevoked }
 
 // Denies reports whether a tombstone can suppress a listed activation.
 // A window starting after the deactivation is new access and must be shown.
-// Without a start time, the listing supplies no evidence of a new window.
+// Without a start time, the listing supplies no evidence of a new window. A
+// tombstone stamped in the future denies nothing: its WrittenAt is not a time
+// the deactivation happened, so no window can be measured against it.
 func (e recordEntry) Denies(a armclient.Assignment) bool {
+	if !e.Revoked() || e.writtenInFuture(time.Now()) {
+		return false
+	}
 	start := a.Properties.StartDateTime
-	return e.Revoked() && (start == nil || !start.After(e.WrittenAt))
+	return start == nil || !start.After(e.WrittenAt)
+}
+
+// writtenInFuture reports whether the entry's WrittenAt sits further ahead of
+// now than [recordClockTolerance] allows, which marks a clock that has been
+// stepped back or a record copied from a machine whose clock ran ahead.
+func (e recordEntry) writtenInFuture(now time.Time) bool {
+	return e.WrittenAt.After(now.Add(recordClockTolerance))
 }
 
 // Confirming reports whether ARM's listing has yet to catch up with an
@@ -138,8 +162,14 @@ func (e recordEntry) PastCeiling(now time.Time) bool {
 
 // stale reports whether an entry has nothing left to say. An activation is
 // spent once its own window closes; a tombstone is spent once it has held ARM
-// off for as long as it may.
+// off for as long as it may. An entry written in the future is spent at once,
+// in either direction: nothing measured from its WrittenAt can be trusted, and
+// ARM's listing — which every command still reconciles against — is the
+// authority it would otherwise outrank indefinitely.
 func (e recordEntry) stale(now time.Time) bool {
+	if e.writtenInFuture(now) {
+		return true
+	}
 	if e.Revoked() {
 		return e.PastCeiling(now)
 	}
@@ -235,7 +265,9 @@ func readOwnedRecordFile(path string, owner *store.Owner) []recordEntry {
 }
 
 // writeRecord replaces an account's record, pruning expired entries on the way
-// out so the file cannot grow without bound.
+// out so the file cannot grow without bound. It takes no lock: a caller that
+// derived entries from a read of the same file wants [updateRecord], which
+// holds the record's lock across both.
 func writeRecord(owner store.Owner, entries []recordEntry) {
 	if !owner.Valid() {
 		return
@@ -244,6 +276,36 @@ func writeRecord(owner store.Owner, entries []recordEntry) {
 	if err != nil {
 		return
 	}
+	writeRecordAt(path, owner, entries)
+}
+
+// updateRecord rewrites an account's record as apply says, under the record's
+// advisory lock so that two pimctl processes rewriting the same file — an `up`
+// alongside a `status` reconciling — cannot each read the old entries and
+// overwrite the other's fresh entry or tombstone. apply receives the live
+// entries exactly as [readRecord] returns them and returns the entries to keep,
+// which are written through [writeRecordAt]. The lock is best-effort: see
+// [lockRecord] for what happens when it cannot be taken.
+func updateRecord(owner store.Owner, apply func(existing []recordEntry) []recordEntry) {
+	if !owner.Valid() {
+		return
+	}
+	path, err := recordPath(owner)
+	if err != nil {
+		return
+	}
+	if err = os.MkdirAll(filepath.Dir(path), store.DirMode); err != nil {
+		return
+	}
+	unlock := lockRecord(path)
+	defer unlock()
+	writeRecordAt(path, owner, apply(readOwnedRecordFile(path, &owner)))
+}
+
+// writeRecordAt is [writeRecord] against a path already resolved, so a caller
+// holding the record's lock does not resolve — and possibly migrate — the file
+// a second time. Entries with nothing left to say are pruned on the way out.
+func writeRecordAt(path string, owner store.Owner, entries []recordEntry) {
 	now := time.Now()
 	keep := make([]recordEntry, 0, len(entries))
 	for _, e := range entries {

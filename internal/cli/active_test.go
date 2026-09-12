@@ -101,7 +101,7 @@ func TestActivationMatchingAndUnknownScopesKeepContext(t *testing.T) {
 }
 
 // TestActiveFanOutQueriesEachScope pins the replacement for ARM's tenant-wide
-// activation listing, which takes 11-21s and was measured returning 126/131/132
+// activation listing, which takes 11-21 s and was measured returning 126/131/132
 // rows on three runs against an unchanged tenant.
 func TestActiveFanOutQueriesEachScope(t *testing.T) {
 	scopes := []string{
@@ -361,6 +361,11 @@ func TestSlowScopeIsReportedNotWaitedFor(t *testing.T) {
 // an unbounded one is what produced the 25s worst case.
 func TestWaitRaisesThePerScopeDeadline(t *testing.T) {
 	tm := defaultTimeouts()
+	// The soft deadline is the figure CLAUDE.md and the --wait hint quote; a
+	// change to it is a change to what "a scope that missed it" means.
+	if tm.scopeSoftDeadline != 3*time.Second {
+		t.Errorf("scopeSoftDeadline = %v, want the documented 3s", tm.scopeSoftDeadline)
+	}
 	if tm.waitScope <= tm.scopeSoftDeadline {
 		t.Fatalf("--wait deadline %v must exceed the soft deadline %v", tm.waitScope, tm.scopeSoftDeadline)
 	}

@@ -20,9 +20,18 @@ import (
 // printStatus writes the activation table, or the JSON envelope when -o json
 // is in force. unconfirmed is the ids of the scopes Azure did not answer for;
 // they are labelled for a human and carried into the JSON even when there are
-// none. An encoding failure is reported on stderr rather than returned — half
-// a JSON document has already reached the caller by then.
-func printStatus(cmd *cobra.Command, rc *runContext, rows []activeRow, unconfirmed []activationScope) {
+// none. azurePending says the rows come from this machine's record and Azure
+// has not been asked yet, which changes only what an empty table says: the
+// JSON already marks every such row unconfirmed. An encoding failure is
+// reported on stderr rather than returned — half a JSON document has already
+// reached the caller by then.
+func printStatus(
+	cmd *cobra.Command,
+	rc *runContext,
+	rows []activeRow,
+	unconfirmed []activationScope,
+	azurePending bool,
+) {
 	if rc.Opts.json() {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
@@ -40,7 +49,7 @@ func printStatus(cmd *cobra.Command, rc *runContext, rows []activeRow, unconfirm
 		}
 		return
 	}
-	printActiveTable(cmd, rows)
+	renderActiveTable(cmd, rows, azurePending)
 }
 
 // statusJSON is an envelope rather than a bare array, so a caller can tell an
@@ -130,16 +139,37 @@ func toActiveJSON(rows []activeRow) []activeJSON {
 	return out
 }
 
-// printActiveTable prints the activation table, a legend for whichever
-// unconfirmed markers appear in it, and the count.
+// printActiveTable prints the activation table Azure has answered for: a
+// legend for whichever unconfirmed markers appear in it, and the count.
 //
 // No rows prints "No roles are currently activated." That sentence is only the
 // whole truth when every scope was read; the scopes that were not are named
 // separately by reportUnconfirmedScopes, so the two must be read together.
 func printActiveTable(cmd *cobra.Command, rows []activeRow) {
+	renderActiveTable(cmd, rows, false)
+}
+
+// emptyStatusLine is what stands in for the table when there are no rows.
+//
+// The plain sentence is Azure's answer. Rendered from this machine's record
+// before Azure has been asked, the same sentence would be read as that answer
+// — stdout is what a reader keeps, while the correction that follows lands on
+// stderr — so the record's version says where it came from and that Azure is
+// still to come.
+func emptyStatusLine(azurePending bool) string {
+	if azurePending {
+		return "No roles are recorded as activated on this machine; checking Azure…"
+	}
+	return "No roles are currently activated."
+}
+
+// renderActiveTable is [printActiveTable] with the empty sentence chosen by
+// azurePending: true when the rows come from this machine's record and Azure
+// has not been asked yet, false once Azure has answered.
+func renderActiveTable(cmd *cobra.Command, rows []activeRow, azurePending bool) {
 	out := cmd.OutOrStdout()
 	if len(rows) == 0 {
-		fmt.Fprintln(out, "No roles are currently activated.")
+		fmt.Fprintln(out, emptyStatusLine(azurePending))
 		return
 	}
 	now := time.Now()
