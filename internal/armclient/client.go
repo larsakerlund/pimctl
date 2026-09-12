@@ -42,7 +42,7 @@ type Client struct {
 }
 
 // DefaultHTTPTimeout bounds a single ARM call. ARM's slowest listing on this
-// tenant takes about 20 seconds; 60 leaves room without hanging a shell.
+// tenant takes about 20 s; 60 s leaves room without hanging a shell.
 const DefaultHTTPTimeout = 60 * time.Second
 
 // New builds the client for one ARM token: that token is the only credential
@@ -274,7 +274,7 @@ func (c *Client) ListAssignments(ctx context.Context) ([]Assignment, error) {
 // ListAssignmentsAtScope lists role assignment schedule instances for the
 // signed-in user at one scope.
 //
-// The tenant-wide form of this call is both slow (11-21s here) and lossy: three
+// The tenant-wide form of this call is both slow (11-21 s here) and lossy: three
 // runs against an unchanged tenant returned 126, 131 and 132 rows with no
 // nextLink. Asking scope by scope returns a complete answer and the slowest
 // single call is a few seconds.

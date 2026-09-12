@@ -7,9 +7,12 @@
 // The first is the interrupt. SIGINT and SIGTERM cancel the context every
 // command runs under, so an activation in progress stops asking ARM for more
 // rather than being killed mid-table. Because os.Exit skips deferred calls,
-// that handler cannot be installed in main: the body is in run(), where the
-// handler is torn down by its own defer and the exit code is returned rather
-// than taken on the spot.
+// that handler cannot be installed in main: it is installed in
+// runWithInterrupts(), where it is torn down by its own defer, and the exit
+// code is returned to main rather than taken on the spot. The body that turns
+// a context, arguments and output streams into an exit code is run(), which
+// takes all of them as parameters so a test can hand it an already-cancelled
+// context and see the interrupt path without sending a signal.
 //
 // The second is the exit code, which is a contract scripts depend on:
 //
@@ -30,6 +33,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -44,43 +48,62 @@ import (
 // print it as `pimctl v<version> (<commit>, <go>, <os/arch>)`.
 var version string
 
-// main stamps the version, runs the command through run and exits with the code
-// it returns. It never returns normally, which is why it holds no defer of its
-// own.
+// interruptedMessage is the one line run prints to stderr when the context was
+// cancelled by a signal. It names the consequence — a request ARM has already
+// accepted is not withdrawn by killing the client — and the command that shows
+// what actually happened.
+const interruptedMessage = "pimctl: interrupted — any request already sent may still be in flight; check `pimctl status`"
+
+// main stamps the version, runs the command through runWithInterrupts and
+// exits with the code it returns. It never returns normally, which is why it
+// holds no defer of its own.
 func main() {
 	cli.SetVersion(version)
 
-	// os.Exit skips deferred calls, so the body lives in run() and the signal
-	// handler is always torn down before the process leaves.
-	os.Exit(run())
+	// os.Exit skips deferred calls, so the body lives in runWithInterrupts()
+	// and the signal handler is always torn down before the process leaves.
+	os.Exit(runWithInterrupts(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run executes the root command under a context cancelled by SIGINT or
-// SIGTERM, prints any error to stderr as `pimctl: …`, and returns the process
-// exit code.
-//
-// It exists so the signal handler it installs is torn down before os.Exit,
-// which runs no deferred calls. An interrupt wins over whatever error the command
-// returned: a cancelled command's error describes the cancellation, not a
-// failure the user needs to act on.
-func run() int {
+// runWithInterrupts installs the SIGINT/SIGTERM handler, runs the command
+// under the context it cancels, and tears the handler down before returning
+// the exit code. It is the only place the process listens for signals; run
+// itself never does, which is what lets a test drive run with a context it
+// cancelled by hand.
+func runWithInterrupts(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	err := cli.NewRootCmd().ExecuteContext(ctx)
+	return run(ctx, args, stdout, stderr)
+}
+
+// run executes the root command with args (the command line without the
+// program name) under ctx, sends the command's output to stdout and stderr,
+// prints any error to stderr as `pimctl: …`, and returns the process exit
+// code.
+//
+// A cancelled ctx wins over whatever the command returned: a cancelled
+// command's error describes the cancellation, not a failure the user needs to
+// act on, so the result is [cli.ExitInterrupted] and [interruptedMessage]
+// regardless of that error. Otherwise the code is [cli.ExitCode] of the error,
+// or [cli.ExitOK] when there was none.
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	root := cli.NewRootCmd()
+	root.SetArgs(args)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+
+	err := root.ExecuteContext(ctx)
 
 	// An interrupt gets the conventional 130 and says so plainly. Any per-role
 	// table has already been printed, with the interrupted roles marked ABORTED
 	// or SKIPPED rather than given a status pimctl never actually observed.
 	if ctx.Err() != nil {
-		fmt.Fprintln(
-			os.Stderr,
-			"pimctl: interrupted — any request already sent may still be in flight; check `pimctl status`",
-		)
+		fmt.Fprintln(stderr, interruptedMessage)
 		return cli.ExitInterrupted
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pimctl: %v\n", err)
+		fmt.Fprintf(stderr, "pimctl: %v\n", err)
 		return cli.ExitCode(err)
 	}
 	return cli.ExitOK
