@@ -1,6 +1,7 @@
-// Covers root.go: that `version` prints something, that a bad -o is refused
-// before any work, and that the help text describes the picker keys pimctl
-// actually has. The subcommands' own behaviour is tested in their own files.
+// Covers root.go: that a bad -o is refused before any work, that no bool
+// flag's usage carries a backtick, and that the help text describes the picker
+// keys pimctl actually has. The subcommands' own behaviour is tested in their
+// own files, and the version line in version_test.go.
 
 package cli
 
@@ -14,14 +15,27 @@ import (
 	"github.com/larsakerlund/pimctl/internal/picker"
 )
 
-func TestVersionCommand(t *testing.T) {
-	out, _, err := runCmd(t, "version")
-	if err != nil {
-		t.Fatal(err)
+// TestBoolFlagUsageHasNoBackticks guards the way pflag reads a usage string:
+// a backticked word names the flag's value, so "every context `cloudctx list`
+// reports" on a bool flag renders as `--all-contexts cloudctx list`, as if the
+// flag took one. A bool flag has no value, so any backtick in its usage is a
+// rendering bug.
+func TestBoolFlagUsageHasNoBackticks(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		check := func(f *pflag.Flag) {
+			if f.Value.Type() == "bool" && strings.Contains(f.Usage, "`") {
+				t.Errorf("%s --%s: bool flag usage %q contains a backtick, which pflag renders as a value name",
+					c.CommandPath(), f.Name, f.Usage)
+			}
+		}
+		c.LocalFlags().VisitAll(check)
+		c.PersistentFlags().VisitAll(check)
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
 	}
-	if !strings.HasPrefix(out, "pimctl ") {
-		t.Errorf("version output = %q", out)
-	}
+	walk(NewRootCmd())
 }
 
 func TestRejectsUnknownOutputFormat(t *testing.T) {

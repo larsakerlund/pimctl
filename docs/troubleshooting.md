@@ -40,3 +40,25 @@ existing credential has picked up the change.
 
 For why these states occur, see
 [Troubleshooting in depth](design.md#troubleshooting-in-depth).
+
+## A role you were just granted is missing from `ls`
+
+The eligible-role listing is cached for ten minutes and each role's PIM policy
+for a day. `--refresh` re-reads them from Azure for one command:
+
+```sh
+pimctl ls --refresh
+```
+
+`pimctl cache clear` deletes every cache — tokens, listings, policies and the
+probed cloudctx version — so the next command starts cold; it leaves the record
+of this machine's own activations alone. `pimctl cache path` prints the cache
+directory, for when you want to look at the files yourself.
+
+## Seeing what a command spent its time on
+
+`--debug` prints a timing breakdown of each phase to stderr — the token, the
+eligibility listing, each per-scope activation read — and whether the token
+came from the cache. It never prints the token itself, only `cache hit` or
+`cache miss`, so its output is safe to paste into a bug report alongside
+`pimctl version`.

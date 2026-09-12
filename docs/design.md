@@ -1,8 +1,9 @@
 # pimctl — design notes
 
 Why pimctl is built the way it is: what was measured, what ARM actually does,
-and which decisions were reversed on evidence. The README is the manual; this is
-the lab notebook behind it.
+and which decisions were reversed on evidence. The guides in this directory,
+starting from [usage.md](usage.md), are the manual; this is the lab notebook
+behind them.
 
 ## The activation listing is a fan-out, not one call
 
