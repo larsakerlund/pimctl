@@ -547,3 +547,91 @@ func TestPreservedActivationExpiryIsRecheckedAtExecution(t *testing.T) {
 		t.Fatalf("expired window reported as held: %#v", got)
 	}
 }
+
+// TestActivationWindowFromScheduleRequest pins where the printed window comes
+// from: ARM's own start and end, never pimctl's clock, and nil rather than an
+// invented time when ARM said nothing.
+func TestActivationWindowFromScheduleRequest(t *testing.T) {
+	at := func(h, m int) *time.Time {
+		v := time.Date(2026, 9, 4, h, m, 0, 0, time.UTC)
+		return &v
+	}
+	mk := func(start string, exp armclient.Expiration, createdOn *time.Time) *armclient.ScheduleRequest {
+		sr := &armclient.ScheduleRequest{}
+		sr.Properties.CreatedOn = createdOn
+		sr.Properties.ScheduleInfo = &armclient.ScheduleInfo{StartDateTime: start, Expiration: exp}
+		return sr
+	}
+	same := func(got, want *time.Time) bool {
+		if got == nil || want == nil {
+			return got == want
+		}
+		return got.Equal(*want)
+	}
+	for _, tc := range []struct {
+		name               string
+		sr                 *armclient.ScheduleRequest
+		wantStart, wantEnd *time.Time
+	}{
+		{
+			name: "endDateTime beats duration",
+			sr: mk("2026-09-04T12:00:00Z", armclient.Expiration{
+				Type: "AfterDateTime", EndDateTime: "2026-09-04T12:30:00Z", Duration: "PT4H",
+			}, nil),
+			wantStart: at(12, 0), wantEnd: at(12, 30),
+		},
+		{
+			name:      "duration is added to the start when endDateTime is absent",
+			sr:        mk("2026-09-04T12:00:00Z", armclient.Expiration{Type: "AfterDuration", Duration: "PT4H"}, nil),
+			wantStart: at(12, 0), wantEnd: at(16, 0),
+		},
+		{
+			name:      "createdOn stands in for an unparsable start",
+			sr:        mk("not a time", armclient.Expiration{Type: "AfterDuration", Duration: "PT1H"}, at(11, 59)),
+			wantStart: at(11, 59), wantEnd: at(12, 59),
+		},
+		{
+			name: "nil when ARM says neither",
+			sr:   &armclient.ScheduleRequest{},
+		},
+		{
+			name:      "nil end when the window has no expiration",
+			sr:        mk("2026-09-04T12:00:00Z", armclient.Expiration{}, nil),
+			wantStart: at(12, 0),
+		},
+		{
+			name: "nil when the start is unparsable and nothing was created",
+			sr:   mk("", armclient.Expiration{Type: "AfterDuration", Duration: "PT1H"}, nil),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := activationStart(tc.sr); !same(got, tc.wantStart) {
+				t.Errorf("activationStart = %v, want %v", got, tc.wantStart)
+			}
+			if got := activationEnd(tc.sr); !same(got, tc.wantEnd) {
+				t.Errorf("activationEnd = %v, want %v", got, tc.wantEnd)
+			}
+		})
+	}
+}
+
+// TestActivationFollowsTheRequestToItsTerminalStatus: ARM lands a PUT below a
+// terminal status and settles it on a later read-back. The CLI keeps asking
+// until it does, reports the role ACTIVATED, and exits 0 — the same request
+// read once would have been STILL PENDING and exit 1.
+func TestActivationFollowsTheRequestToItsTerminalStatus(t *testing.T) {
+	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()[:1], putStatus: "PendingProvisioning"}
+	f.install()
+	f.setGetStatuses("PendingProvisioning", "Provisioned")
+
+	out, errOut, err := runCmd(t, "up", "-c", "contoso", "--all", "-j", "x", "-y")
+	if err != nil {
+		t.Fatalf("up exited %d: %v\n%s\n%s", ExitCode(err), err, out, errOut)
+	}
+	if n := f.requestGetCount(); n < 2 {
+		t.Errorf("the request was read back %d time(s); the second read is the one that saw Provisioned", n)
+	}
+	if !strings.Contains(out, "ACTIVATED") || strings.Contains(out, "STILL PENDING") {
+		t.Errorf("a request that settled must be reported as activated:\n%s", out)
+	}
+}

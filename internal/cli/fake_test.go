@@ -56,10 +56,151 @@ type fakeARM struct {
 	// eligGets counts eligibility listings, to tell a cold read from a cached one.
 	eligGets int
 	// activeDelay simulates ARM's slow roleAssignmentScheduleInstances call,
-	// which takes 12-19s on the real tenant.
+	// which takes 11-21 s on the real tenant.
 	activeDelay time.Duration
+	// pagedScope names one scope whose activation listing is served in two
+	// pages joined by a nextLink, the way ARM pages a long listing. Other
+	// scopes answer in one page.
+	pagedScope string
+	// secondPageGets counts fetches of a paged listing's second page, which is
+	// the only way its rows can reach the caller.
+	secondPageGets int
+	// faults are the transient failures a scope's activation listing serves
+	// before answering normally, keyed by lower-cased scope id.
+	faults map[string]*scopeFault
+	// scopeGets counts activation listings per lower-cased scope id, so a test
+	// can prove a faulted scope was asked again rather than given up on.
+	scopeGets map[string]int
+	// getStatuses are the statuses successive read-backs of a schedule request
+	// report, consumed from the front and holding at the last one. Empty means
+	// every read-back reports putStatus.
+	getStatuses []string
+	// resources are the subscription, resource-group and resource listings the
+	// init scope browser reads, keyed by the lower-cased request path.
+	resources map[string][]armclient.Resource
+	// pagedResources is the resources key whose listing is served in two pages
+	// joined by a nextLink.
+	pagedResources string
 
 	srv *httptest.Server
+}
+
+// scopeFault is a transient failure the activation listing at one scope
+// answers with a bounded number of times before answering normally: the shape
+// of ARM throttling a burst, or a gateway timing out on one leg of the fan-out.
+type scopeFault struct {
+	code       int    // the HTTP status, one of the three the client retries.
+	retryAfter string // the Retry-After header value, or empty for no header.
+	remaining  int    // how many more calls answer with the fault.
+}
+
+// failScope makes the next times activation listings at scope answer with
+// code, carrying retryAfter as the Retry-After header when it is non-empty,
+// after which the scope answers normally.
+func (f *fakeARM) failScope(scope string, code int, retryAfter string, times int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.faults == nil {
+		f.faults = map[string]*scopeFault{}
+	}
+	f.faults[strings.ToLower(scope)] = &scopeFault{code: code, retryAfter: retryAfter, remaining: times}
+}
+
+// takeFault consumes one fault at scope, reporting whether there was one to
+// serve and what it looks like.
+func (f *fakeARM) takeFault(scope string) (fault scopeFault, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sf := f.faults[strings.ToLower(scope)]
+	if sf == nil || sf.remaining == 0 {
+		return scopeFault{}, false
+	}
+	sf.remaining--
+	return *sf, true
+}
+
+// countScopeGet records one activation listing at scope.
+func (f *fakeARM) countScopeGet(scope string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.scopeGets == nil {
+		f.scopeGets = map[string]int{}
+	}
+	f.scopeGets[strings.ToLower(scope)]++
+}
+
+// scopeGetCount returns how many activation listings scope has answered,
+// faulted ones included.
+func (f *fakeARM) scopeGetCount(scope string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.scopeGets[strings.ToLower(scope)]
+}
+
+// countSecondPage records that a paged listing's second page was fetched.
+func (f *fakeARM) countSecondPage() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.secondPageGets++
+}
+
+// secondPageCount returns how many second pages have been fetched.
+func (f *fakeARM) secondPageCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.secondPageGets
+}
+
+// setGetStatuses installs the statuses successive read-backs of a schedule
+// request report, in order; the last one is held once the rest are consumed.
+func (f *fakeARM) setGetStatuses(statuses ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getStatuses = statuses
+}
+
+// nextGetStatus returns the status the next read-back reports: the front of
+// getStatuses, consumed until one remains, or putStatus when none were set.
+func (f *fakeARM) nextGetStatus() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.getStatuses) == 0 {
+		return f.putStatus
+	}
+	s := f.getStatuses[0]
+	if len(f.getStatuses) > 1 {
+		f.getStatuses = f.getStatuses[1:]
+	}
+	return s
+}
+
+// isPaged reports whether the activation listing at scope is served in pages.
+func (f *fakeARM) isPaged(scope string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pagedScope != "" && strings.EqualFold(f.pagedScope, scope)
+}
+
+// pageToken is the query parameter a nextLink carries to ask for the second
+// page. ARM's own continuation token is opaque; this one just has to be
+// recognisable.
+const pageToken = "$skiptoken"
+
+// nextLinkFor builds the absolute URL of a listing's second page, on the same
+// origin the request arrived at so the client's origin check accepts it.
+func nextLinkFor(r *http.Request) string {
+	q := r.URL.Query()
+	q.Set(pageToken, "page2")
+	return "http://" + r.Host + r.URL.Path + "?" + q.Encode()
+}
+
+// serveScopeFault writes the transient failure a faulted scope answers with.
+func serveScopeFault(w http.ResponseWriter, fault scopeFault) {
+	if fault.retryAfter != "" {
+		w.Header().Set("Retry-After", fault.retryAfter)
+	}
+	w.WriteHeader(fault.code)
+	fmt.Fprintf(w, `{"error":{"code":"%s","message":"transient"}}`, http.StatusText(fault.code))
 }
 
 // setPutStatus changes the status new requests report. Safe to call while the
@@ -147,16 +288,70 @@ func (f *fakeARM) resetPuts() {
 	f.puts = nil
 }
 
-// serveActivated answers the activation listing, honouring the artificial delay
-// that stands in for ARM's slow tenant-wide call.
-func (f *fakeARM) serveActivated(w http.ResponseWriter) {
+// serveActivated answers the activation listing at scope (empty for the
+// tenant-wide call), honouring the artificial delay that stands in for ARM's
+// slow tenant-wide call, then any fault installed at the scope, then paging.
+func (f *fakeARM) serveActivated(w http.ResponseWriter, r *http.Request, scope string) {
+	f.countScopeGet(scope)
 	f.mu.Lock()
 	d := f.activeDelay
 	f.mu.Unlock()
 	if d > 0 {
 		time.Sleep(d)
 	}
+	if fault, ok := f.takeFault(scope); ok {
+		serveScopeFault(w, fault)
+		return
+	}
+	if f.isPaged(scope) {
+		f.servePagedActivated(w, r)
+		return
+	}
 	writeJSON(f.t, w, map[string]any{"value": f.activated})
+}
+
+// servePagedActivated splits the activations into a first page carrying one
+// row and a nextLink, and a second page carrying the rest.
+func (f *fakeARM) servePagedActivated(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get(pageToken) == "" {
+		writeJSON(f.t, w, map[string]any{"value": f.activated[:1], "nextLink": nextLinkFor(r)})
+		return
+	}
+	f.countSecondPage()
+	writeJSON(f.t, w, map[string]any{"value": f.activated[1:]})
+}
+
+// serveResources answers the subscription, resource-group and resource
+// listings the init scope browser reads, from the resources map. A path the
+// map does not know is answered the way ARM answers a subscription or group
+// the caller cannot see: a 404 in ARM's error envelope.
+func (f *fakeARM) serveResources(w http.ResponseWriter, r *http.Request, path string) {
+	key := strings.ToLower(path)
+	rows, ok := f.resources[key]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"code":"ResourceNotFound","message":"the scope was not found"}}`)
+		return
+	}
+	if f.pagedResources == key && len(rows) > 1 {
+		if r.URL.Query().Get(pageToken) == "" {
+			writeJSON(f.t, w, map[string]any{"value": rows[:1], "nextLink": nextLinkFor(r)})
+			return
+		}
+		f.countSecondPage()
+		rows = rows[1:]
+	}
+	writeJSON(f.t, w, map[string]any{"value": rows})
+}
+
+// isResourceListing reports whether path is one of the three resource
+// listings the init scope browser reads: the tenant's subscriptions, the
+// groups under one subscription, or the resources under one group.
+func isResourceListing(path string) bool {
+	lower := strings.ToLower(path)
+	return lower == "/subscriptions" ||
+		strings.HasSuffix(lower, "/resourcegroups") ||
+		strings.HasSuffix(lower, "/resources")
 }
 
 // servePolicyAssignment points every scope at the same stub policy.
@@ -216,6 +411,22 @@ func (f *fakeARM) serveScheduleRequest(w http.ResponseWriter, r *http.Request, p
 	}})
 }
 
+// serveRequest routes one schedule request call: a PUT creates it, a GET reads
+// it back with the next status in the configured sequence, and anything else
+// is a test bug.
+func (f *fakeARM) serveRequest(w http.ResponseWriter, r *http.Request, path string) {
+	switch r.Method {
+	case http.MethodPut:
+		f.serveScheduleRequest(w, r, path)
+	case http.MethodGet:
+		f.countRequestGet()
+		writeJSON(f.t, w, map[string]any{"id": path, "properties": map[string]any{"status": f.nextGetStatus()}})
+	default:
+		f.t.Errorf("fakeARM: unexpected %s %s", r.Method, path)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 // applyDefaults fills in the policy and request-status stubs a test did not set.
 func (f *fakeARM) applyDefaults() {
 	if f.maxDuration == "" {
@@ -240,19 +451,19 @@ func (f *fakeARM) start() *httptest.Server {
 		case r.Method == http.MethodGet && strings.HasSuffix(p, "/roleAssignmentScheduleInstances"):
 			// At root scope this is the tenant-wide listing; anywhere else it
 			// is one leg of the per-scope fan-out.
-			if p == "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances" {
+			scope := strings.TrimSuffix(p, "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances")
+			if scope == "" {
 				f.countTenantWide()
 			}
-			f.serveActivated(w)
+			f.serveActivated(w, r, scope)
 		case r.Method == http.MethodGet && strings.Contains(p, "/roleManagementPolicyAssignments"):
 			f.servePolicyAssignment(w, p)
 		case r.Method == http.MethodGet && strings.Contains(p, "/roleManagementPolicies/"):
 			f.servePolicy(w, p)
-		case r.Method == http.MethodPut && strings.Contains(p, "/roleAssignmentScheduleRequests/"):
-			f.serveScheduleRequest(w, r, p)
-		case r.Method == http.MethodGet && strings.Contains(p, "/roleAssignmentScheduleRequests/"):
-			f.countRequestGet()
-			writeJSON(f.t, w, map[string]any{"id": p, "properties": map[string]any{"status": f.status()}})
+		case strings.Contains(p, "/roleAssignmentScheduleRequests/"):
+			f.serveRequest(w, r, p)
+		case r.Method == http.MethodGet && isResourceListing(p):
+			f.serveResources(w, r, p)
 		default:
 			f.t.Errorf("fakeARM: unexpected %s %s", r.Method, p)
 			w.WriteHeader(http.StatusNotFound)
