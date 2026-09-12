@@ -192,9 +192,11 @@ func writeFakeProfiles(t *testing.T, contexts []string) {
 // [installFakeRunner] gives each test its own, for the same reason each test
 // gets its own XDG directories: per-context state is now shared between the
 // token cache and the activation record, and a root shared between tests let
-// one test's activations show up in another's `status`. TestMain's value is the
-// fallback for a test that writes per-context state without installing a fake
-// registry at all.
+// one test's activations show up in another's `status`. TestMain's value is
+// where a test that writes per-context state without installing a fake
+// registry lands by omission — disposable rather than a real ~/.cloudctx — and
+// TestMain fails the run if anything is found there afterwards, naming the
+// files, so the omission is caught rather than tolerated.
 var testCloudctxHome string
 
 // fakeContextStore is one context's store directory in the test tree, the value
@@ -273,11 +275,50 @@ func TestMain(m *testing.M) {
 		}
 	}
 	code := m.Run()
+	if leaked := sharedStoreLeaks(testCloudctxHome); len(leaked) > 0 {
+		fmt.Fprintf(os.Stderr, "FAIL: %d file(s) written to the shared cloudctx home instead of a per-test one; "+
+			"the test that wrote them needs installFakeRunner first:\n", len(leaked))
+		for _, path := range leaked {
+			fmt.Fprintf(os.Stderr, "\t%s\n", path)
+		}
+		if code == 0 {
+			code = 1
+		}
+	}
 	if err := os.RemoveAll(root); err != nil {
 		// Nothing left to fail: the tests are done and the tree is in TMPDIR.
 		fmt.Fprintf(os.Stderr, "warning: cannot remove %s: %v\n", root, err)
 	}
 	os.Exit(code)
+}
+
+// sharedStoreLeaks lists every file under the package-wide cloudctx home, the
+// root [installFakeRunner] replaces for the duration of a test. It is meant to
+// be empty when the run ends: a file there was written by a test whose fake
+// `cloudctx show` pointed at the shared root, and it survives into the next
+// test — and into the next `-count` iteration of the same test, where a fresh
+// token already in the store keeps the stale one from being migrated and the
+// 401 the test is about never fires. The paths returned name the context and
+// the kind of file, which is enough to find the test that wrote them.
+//
+// A root that was never created is clean. Any other failure to read the tree
+// is returned as a line of its own rather than swallowed, because a guard that
+// cannot look must not report "nothing leaked".
+func sharedStoreLeaks(root string) []string {
+	var leaked []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			leaked = append(leaked, path)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		leaked = append(leaked, root+": "+err.Error())
+	}
+	return leaked
 }
 
 // heldEntries returns the activations the record believes are still held —

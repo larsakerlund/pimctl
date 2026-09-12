@@ -331,6 +331,11 @@ func TestUnauthorizedDropsTheCachedTokenAndRetriesOnce(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv(envContext, "")
+	// The fake registry gives this test its own context store. The token the
+	// re-mint caches lands there, and a store shared with the next run of this
+	// test would already hold a fresh token, so the stale one below would never
+	// be read and the 401 this test is about would never fire.
+	installFakeRunner(t, []string{"contoso"})
 
 	// A cached token that the server will reject.
 	stale := &azauth.Token{
@@ -359,22 +364,23 @@ func TestUnauthorizedDropsTheCachedTokenAndRetriesOnce(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// The re-mint path goes through the real AcquireCached, so give it a runner.
+	// The re-mint path goes through the real AcquireCached, so give it a runner
+	// that counts.
 	freshJWT := fakeTestJWT(`{"oid":"oid-1","tid":"tid-1"}`)
-	prevRunner := azauth.DefaultRunner
+	registry := azauth.DefaultRunner
 	minted := 0
 	azauth.DefaultRunner = func(name string, args ...string) ([]byte, []byte, error) {
 		// The registry reads behind the tenant check and the store path are
-		// not mints, and counting them as such would hide a second one.
+		// not mints, and counting them as such would hide a second one; the
+		// fake registry answers them with this test's own store.
 		if name == "cloudctx" && len(args) > 1 && args[0] == "show" {
-			return []byte("[" + args[1] + "]\nazure_tenant = tid-1\n\nstore:           " +
-				fakeContextStore(args[1]) + "\n"), nil, nil
+			return registry(name, args...)
 		}
 		minted++
 		expiry := time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000")
 		return []byte(`{"accessToken":"` + freshJWT + `","expiresOn":"` + expiry + `","tenant":"tid-1"}`), nil, nil
 	}
-	t.Cleanup(func() { azauth.DefaultRunner = prevRunner })
+	t.Cleanup(func() { azauth.DefaultRunner = registry })
 
 	installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
 		tok, _, err := azauth.ReadTokenCache("contoso", "", azauth.TokenCacheMargin, azauth.DefaultRunner)
@@ -418,6 +424,9 @@ func TestPersistentUnauthorizedIsReported(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv(envContext, "")
+	// The stale token and its replacement both live in this test's own context
+	// store, so neither survives into another test.
+	installFakeRunner(t, []string{"contoso"})
 
 	azauth.WriteTokenCache(&azauth.Token{
 		Context:     "contoso",
@@ -438,13 +447,8 @@ func TestPersistentUnauthorizedIsReported(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	prevRunner := azauth.DefaultRunner
-	jwt := fakeTestJWT(`{"oid":"oid-1","tid":"tid-1"}`)
-	azauth.DefaultRunner = func(string, ...string) ([]byte, []byte, error) {
-		expiry := time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000")
-		return []byte(`{"accessToken":"` + jwt + `","expiresOn":"` + expiry + `","tenant":"tid-1"}`), nil, nil
-	}
-	t.Cleanup(func() { azauth.DefaultRunner = prevRunner })
+	// The re-mint after the first 401 is the fake registry's get-access-token
+	// answer; nothing else needs to run.
 
 	installSessionOpener(t, func(resolution, *timings, bool) ([]*session, []error, error) {
 		tok := readTokenCache(t, "contoso")
