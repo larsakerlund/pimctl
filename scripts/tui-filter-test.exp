@@ -5,7 +5,8 @@
 #
 # The narrowing is proved by a count, not by eyeballing a frame: after typing
 # "cost", ctrl+a selects all *matching* rows. If the filter had done nothing this
-# would come back with all 20.
+# would come back with all 20. On the way it also types a filter nothing
+# matches, checks the picker says so, and clears it with esc.
 #
 # Usage:
 #   go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
@@ -78,6 +79,36 @@ expect {
 }
 puts "\n>>> CHECK 5 PASS: the Cost Management Contributor rows are the ones kept"
 
+# A filter nothing matches must say so rather than draw a blank list, and esc
+# must clear it in one keystroke so the operator can start over.
+send -- "zzz"
+expect {
+    -re "0 of 20 shown" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "typing 'costzzz' did not empty the list" }
+}
+expect {
+    -re "nothing matches" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "an empty match drew no 'nothing matches' line" }
+}
+puts "\n>>> CHECK 6 PASS: 'costzzz' shows '0 of 20 shown' and the 'nothing matches' line"
+
+send -- "\033"
+expect {
+    -re "20 of 20 shown" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "esc did not clear the no-match filter" }
+}
+puts "\n>>> CHECK 7 PASS: esc cleared the filter back to '20 of 20 shown'"
+
+send -- "cost"
+expect {
+    -re "2 of 20 shown" {}
+    eof { fail "probe exited before the expected output" }
+    timeout { fail "retyping 'cost' after esc did not narrow the list again" }
+}
+
 # ctrl+a selects every matching row; enter confirms.
 send -- "\001"
 expect {
@@ -95,7 +126,7 @@ expect {
     eof { fail "probe exited before the expected output" }
     timeout { fail "never reported a selection count" }
 }
-puts "\n>>> CHECK 6 PASS: ctrl+a inside the filter returned exactly 2 rows (20 -> 2)"
+puts "\n>>> CHECK 8 PASS: ctrl+a inside the filter returned exactly 2 rows (20 -> 2)"
 
 expect {
     "PROBE_DONE" {}
