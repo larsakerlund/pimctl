@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -395,5 +396,111 @@ func TestDownIncludesRecordedActivations(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDownNamesANarrowerScopeActivation: an activation made at a narrower
+// scope than its eligibility (`up --at`) has a key of its own, so --role,
+// --scope and --key must resolve against the activations as well as the
+// eligibilities. Each case activates Reader at a resource group under a
+// subscription-level eligibility, then names it for deactivation.
+func TestDownNamesANarrowerScopeActivation(t *testing.T) {
+	at := testProjectSubscription + "/resourceGroups/app-rg"
+	cases := []struct {
+		name string
+		args []string
+		want []string // scopes a deactivation must be sent at, and no others.
+	}{
+		{"role reaches both scopes", []string{"--role", "Reader"}, []string{at, testProjectSubscription}},
+		{"scope matches the activation", []string{"--role", "Reader", "--scope", "app-rg"}, []string{at}},
+		{
+			"scope matches the granting scope",
+			[]string{"--role", "Reader", "--scope", "Dev"},
+			[]string{testProjectSubscription},
+		},
+		{"key of the activation", []string{"--key", selectionKeyFor("contoso", at, testProjectRole)}, []string{at}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := mkElig("Reader", testProjectRole, testProjectSubscription, "Dev", "Subscription")
+			f := &fakeARM{t: t, eligibilities: []armclient.Eligibility{e}}
+			installProject(t, f)
+			out, stderr, err := runCmd(
+				t,
+				"up",
+				"--role",
+				"Reader",
+				"--at",
+				at,
+				"-c",
+				"contoso",
+				"-j",
+				"test",
+				"-y",
+				"--no-wait",
+			)
+			if err != nil {
+				t.Fatalf("up --at: %v\n%s\n%s", err, out, stderr)
+			}
+			f.resetPuts()
+
+			args := append([]string{"down", "-c", "contoso", "-y", "--no-wait"}, tc.args...)
+			out, stderr, err = runCmd(t, args...)
+			if err != nil {
+				t.Fatalf("%v: %v\n%s\n%s", args, err, out, stderr)
+			}
+			puts := f.putBodies()
+			got := make([]string, 0, len(puts))
+			for _, body := range puts {
+				props := mustObject(t, body, "properties")
+				if props["requestType"] != "SelfDeactivate" {
+					t.Fatalf("requestType = %v", props["requestType"])
+				}
+				id := mustText(t, props, "roleDefinitionId")
+				scope, _, ok := strings.Cut(id, "/providers/Microsoft.Authorization/roleDefinitions/")
+				if !ok {
+					t.Fatalf("roleDefinitionId not qualified to a scope: %s", id)
+				}
+				got = append(got, scope)
+			}
+			slices.Sort(got)
+			want := slices.Clone(tc.want)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("deactivated at %v, want %v\n%s", got, want, out)
+			}
+		})
+	}
+}
+
+// TestDownRejectsPresetGivenTwice: two different presets, one bare and one by
+// flag, are refused with the wording `up` uses; the same name both ways is not.
+func TestDownRejectsPresetGivenTwice(t *testing.T) {
+	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()}
+	f.install()
+	want := `preset given twice: "daily" and --preset "other"`
+	for _, verb := range []string{"down", "deactivate"} {
+		_, _, err := runCmd(t, verb, "daily", "--preset", "other", "-c", "contoso", "-y")
+		if err == nil || err.Error() != want {
+			t.Errorf("%s daily --preset other: err = %v, want %q", verb, err, want)
+		}
+	}
+	if _, _, err := runCmd(t, "down", "daily", "--preset", "daily", "-c", "contoso", "-y"); err != nil &&
+		strings.Contains(err.Error(), "given twice") {
+		t.Errorf("the same preset named both ways was refused: %v", err)
+	}
+}
+
+// TestDownKeyUsageNamesNoValue: pflag renders backticked text in a usage string
+// as the flag's value name, so the --key usage must not carry any.
+func TestDownKeyUsageNamesNoValue(t *testing.T) {
+	f := &fakeARM{t: t}
+	f.install()
+	out, _, err := runCmd(t, "down", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "--key pimctl list") || !strings.Contains(out, "--key stringArray") {
+		t.Errorf("--key usage:\n%s", out)
 	}
 }

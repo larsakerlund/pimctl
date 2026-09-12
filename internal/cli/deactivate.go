@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/config"
 	"github.com/larsakerlund/pimctl/internal/term"
 )
@@ -58,8 +59,8 @@ to narrow it.`,
   pimctl down -y`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 1 {
-				o.preset = args[0]
+			if err := o.takePresetArg(args); err != nil {
+				return err
 			}
 			o.impliedAll = o.preset == "" && !o.all &&
 				len(o.roles) == 0 && len(o.scopes) == 0 && len(o.keys) == 0
@@ -88,14 +89,29 @@ them without a terminal.`,
   pimctl deactivate --all -y`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 1 {
-				o.preset = args[0]
+			if err := o.takePresetArg(args); err != nil {
+				return err
 			}
 			return runDeactivate(cmd, opts, d, &o)
 		},
 	}
 	addDeactivateFlags(cmd, &o)
 	return cmd
+}
+
+// takePresetArg adopts a bare PRESET argument as --preset. Naming two
+// different presets, one bare and one by flag, is refused with the same
+// wording `up` uses rather than letting the argument silently win; the same
+// name both ways is accepted.
+func (o *deactivateOpts) takePresetArg(args []string) error {
+	if len(args) != 1 {
+		return nil
+	}
+	if o.preset != "" && o.preset != args[0] {
+		return fmt.Errorf("preset given twice: %q and --preset %q", args[0], o.preset)
+	}
+	o.preset = args[0]
+	return nil
 }
 
 // addDeactivateFlags registers the selection flags on cmd and binds them to o,
@@ -115,7 +131,7 @@ func addDeactivateFlags(cmd *cobra.Command, o *deactivateOpts) {
 		&o.keys,
 		"key",
 		nil,
-		"select roles by the stable key shown in `pimctl list` (repeatable; prefixes allowed)",
+		"select roles by the stable key shown in 'pimctl list' (repeatable; prefixes allowed)",
 	)
 	f.StringVar(&o.preset, "preset", "", "select the roles saved in this preset")
 	f.BoolVar(&o.noWait, "no-wait", false, "submit the requests without polling for the final status")
@@ -323,12 +339,14 @@ func selectTargets(
 		return mergeTargets(selected, activeTargets), nil
 
 	case len(o.keys) > 0, len(o.roles) > 0, len(o.scopes) > 0:
-		// Match against eligibility, which is cached and complete, then merge
-		// in anything the activation listing did show.
+		// Match against eligibility, which is cached and complete, plus every
+		// activation whose scope no eligibility carries, then merge in anything
+		// the activation listing did show.
 		rows, listErrs, _ := readEligibilities(ctx, cmd, rc)
 		if len(listErrs) > 0 {
 			reportContextFailures(cmd.ErrOrStderr(), listErrs)
 		}
+		rows = withActiveRows(rows, active)
 		var chosen []row
 		var err error
 		if len(o.keys) > 0 {
@@ -359,6 +377,48 @@ func selectTargets(
 		out = append(out, targetFromActive(p))
 	}
 	return out, nil
+}
+
+// withActiveRows appends to the eligibility rows one row for each activation
+// that no eligibility row already identifies, so --role, --scope and --key
+// resolve against both.
+//
+// An activation made at a narrower scope than its eligibility (`up --at`) has
+// a key of its own: the eligibility is at the subscription, the activation at a
+// resource group inside it. Matching the flags against eligibilities alone
+// finds only the granting scope, so a deactivation there is answered
+// RoleAssignmentDoesNotExist and the narrower activation is left held. Folding
+// the activations into the candidate rows lets one selectByName or selectByKeys
+// pass see both, which also keeps its exact-beats-substring rule joint across
+// the two sources: an exact role name among the eligibilities still stops a
+// substring from picking up a differently named activation.
+func withActiveRows(rows []row, active []activeRow) []row {
+	seen := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		seen[r.Key()] = true
+	}
+	out := slices.Clone(rows)
+	for _, a := range active {
+		r := rowFromActive(a)
+		if seen[r.Key()] {
+			continue
+		}
+		seen[r.Key()] = true
+		out = append(out, r)
+	}
+	return out
+}
+
+// rowFromActive renders an activation as a selectable row, carrying the scope,
+// role and display names the selectors match on. The row identifies the same
+// (context, scope, role) as targetFromActive does, so a target built from it
+// merges with the activation in mergeTargets and inherits its SeenActive.
+func rowFromActive(a activeRow) row {
+	var e armclient.Eligibility
+	e.Properties.Scope = a.Assignment.Properties.Scope
+	e.Properties.RoleDefinitionID = a.Assignment.Properties.RoleDefinitionID
+	e.Properties.ExpandedProperties = a.Assignment.Properties.ExpandedProperties
+	return row{Context: a.Context, Elig: e, Active: &a.Assignment, ActiveState: a.State}
 }
 
 // attachSessions gives every target the session for its context.
