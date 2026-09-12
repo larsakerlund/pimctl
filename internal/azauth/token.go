@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,8 +31,13 @@ type Token struct {
 	Context string
 	// AccessToken is the raw bearer token. Never print this.
 	AccessToken string
-	// ExpiresOn is az's local-time expiry string, passed through verbatim.
+	// ExpiresOn is az's local-time expiry string, passed through verbatim. It
+	// is the fallback [Token.Expiry] reads when ExpiresAt is absent.
 	ExpiresOn string
+	// ExpiresAt is the expiry as Unix seconds, from az's `expires_on` field,
+	// or 0 when az did not report one. It is preferred over ExpiresOn because
+	// an epoch does not move when the machine's time zone does.
+	ExpiresAt int64
 	// Tenant is the tenant reported by az account get-access-token.
 	Tenant string
 	// PrincipalID is the `oid` claim: the signed-in user's object id. This is
@@ -49,11 +55,17 @@ type Token struct {
 	FromCache bool
 }
 
-// Expiry parses az's local-time expiry string. az emits
-// "2026-09-04 12:00:00.000000" in local time; newer versions may emit RFC3339.
-// A value that cannot be parsed yields the zero time, which every caller treats
-// as "already expired".
+// Expiry returns when the token stops being valid. ExpiresAt wins when az
+// reported it: an epoch is the same instant whatever TZ the reading process
+// runs under, whereas the local-time string is parsed in time.Local and shifts
+// by the zone difference if TZ changes between mint and read. Without an epoch
+// it parses the string az emits — "2026-09-04 12:00:00.000000" in local time;
+// newer versions may emit RFC3339. A value that cannot be parsed yields the
+// zero time, which every caller treats as "already expired".
 func (t Token) Expiry() time.Time {
+	if t.ExpiresAt > 0 {
+		return time.Unix(t.ExpiresAt, 0)
+	}
 	raw := strings.TrimSpace(t.ExpiresOn)
 	if raw == "" {
 		return time.Time{}
@@ -241,9 +253,36 @@ var DefaultRunner Runner = execRunner
 type tokenResponse struct {
 	AccessToken string `json:"accessToken"` // the bearer token; never logged, never written outside the 0600 cache.
 	// ExpiresOn is az's local-time string, not RFC 3339, and is parsed in the
-	// machine's own location.
+	// machine's own location. It is the fallback when ExpiresAt is absent.
 	ExpiresOn string `json:"expiresOn"`
-	Tenant    string `json:"tenant"` // the tenant az minted it for, used to confirm the context resolved as expected.
+	// ExpiresAt is az's `expires_on`: the same expiry as Unix seconds, which
+	// az has emitted as a JSON number and as a string depending on version.
+	ExpiresAt unixSeconds `json:"expires_on"`
+	Tenant    string      `json:"tenant"` // the tenant az minted it for, used to confirm the context resolved as expected.
+}
+
+// unixSeconds is a Unix timestamp az may write as a JSON number, a quoted
+// number, or not at all. Anything unreadable decodes as 0 rather than failing
+// the whole response: the local-time string is still there to fall back on,
+// and a token pimctl refuses to parse is worse than one it times from the
+// less robust of two fields.
+type unixSeconds int64
+
+// UnmarshalJSON accepts `1757000000`, `"1757000000"`, a fractional form of
+// either, and `null`; every other shape yields 0 and no error, so the caller
+// falls back to the local-time string.
+func (u *unixSeconds) UnmarshalJSON(b []byte) error {
+	*u = 0
+	raw := strings.TrimSpace(strings.Trim(strings.TrimSpace(string(b)), `"`))
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	secs, err := strconv.ParseFloat(raw, 64)
+	if err != nil || secs <= 0 {
+		return nil //nolint:nilerr // an unreadable epoch is "not reported", by design; see the type's doc.
+	}
+	*u = unixSeconds(secs)
+	return nil
 }
 
 // TokenArgs builds the argv for minting an ARM token in the given cloudctx
@@ -343,6 +382,7 @@ func Acquire(context string, run Runner) (*Token, error) {
 		Context:           context,
 		AccessToken:       tr.AccessToken,
 		ExpiresOn:         tr.ExpiresOn,
+		ExpiresAt:         int64(tr.ExpiresAt),
 		Tenant:            tr.Tenant,
 		PrincipalID:       claims.OID,
 		TenantID:          claims.TID,

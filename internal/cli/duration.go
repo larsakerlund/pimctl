@@ -28,7 +28,18 @@ func parseFriendlyDuration(s string) (time.Duration, error) {
 	}
 	upper := strings.ToUpper(trimmed)
 	if strings.HasPrefix(upper, "P") {
-		return armclient.ParseISODuration(upper)
+		d, err := armclient.ParseISODuration(upper)
+		if err != nil {
+			return 0, err
+		}
+		// A day count past about 106,751 overflows time.Duration and comes
+		// back negative; that is not a duration anyone meant, and letting it
+		// through would have the caller report it as "must be greater than
+		// zero", which sends the reader at the wrong problem.
+		if d < 0 {
+			return 0, fmt.Errorf("%q is not a duration I understand (try 2h, 90m, 1h30m or PT2H30M)", s)
+		}
+		return d, nil
 	}
 	lower := strings.ToLower(trimmed)
 	if !goDurationRE.MatchString(lower) {

@@ -32,6 +32,26 @@ func TestFileNameIsOneStandInForTheNamelessContext(t *testing.T) {
 	}
 }
 
+// FuzzFileName: the property TestFileNameIsOneStandInForTheNamelessContext
+// spot-checks, over every string — the result is one safe path element, so a
+// context name can never steer a write out of the directory it belongs in.
+func FuzzFileName(f *testing.F) {
+	for _, seed := range []string{"", "contoso", "///", "a/b:c", "..", "../../etc/passwd", ".", "...", "a\x00b", `C:\x`} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, name string) {
+		got := FileName(name)
+		switch {
+		case got == "", got == ".", got == "..":
+			t.Errorf("FileName(%q) = %q, which is not a name", name, got)
+		case filepath.Base(got) != got:
+			t.Errorf("FileName(%q) = %q, which is more than one path element", name, got)
+		case strings.ContainsAny(got, "/\\\x00"):
+			t.Errorf("FileName(%q) = %q, which contains a separator or NUL", name, got)
+		}
+	})
+}
+
 // TestDirFollowsXDG: the directory is computed, never created, and honours
 // XDG_CACHE_HOME so a test — or a user with an unusual home — can redirect
 // everything pimctl writes with one variable.

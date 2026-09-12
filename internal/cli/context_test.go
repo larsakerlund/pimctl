@@ -131,6 +131,72 @@ func TestResolveContextsDedupesAndTrims(t *testing.T) {
 	}
 }
 
+// TestResolveContextsRefusesNamesThatCannotReachCloudctx: the name is handed
+// to cloudctx as a positional argument, so `-c --help` would run `cloudctx
+// show --help`. Every source is checked before anything is spawned, and the
+// error names the source so the reader knows which one to fix.
+func TestResolveContextsRefusesNamesThatCannotReachCloudctx(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		flags      []string
+		presets    []string
+		env        map[string]string
+		wantSource contextSource
+		wantReason string
+	}{
+		{name: "a flag beginning with a dash", flags: []string{"--help"}, wantSource: SourceFlag, wantReason: "option"},
+		{name: "a second flag beginning with a dash", flags: []string{"ok", "-x"}, wantSource: SourceFlag, wantReason: "option"},
+		{name: "an empty flag", flags: []string{""}, wantSource: SourceFlag, wantReason: "empty"},
+		{name: "a flag with whitespace", flags: []string{"a b"}, wantSource: SourceFlag, wantReason: "whitespace"},
+		{name: "a flag with a slash", flags: []string{"a/b"}, wantSource: SourceFlag, wantReason: "path separator"},
+		{name: "a flag with a backslash", flags: []string{`a\b`}, wantSource: SourceFlag, wantReason: "path separator"},
+		{name: "a preset context", presets: []string{"-x"}, wantSource: SourcePreset, wantReason: "option"},
+		{name: "a mixed preset", presets: []string{"", "bad name"}, wantSource: SourcePreset, wantReason: "whitespace"},
+		{name: "the environment", env: map[string]string{envContext: "-x"}, wantSource: SourceEnv, wantReason: "option"},
+		{name: "the environment with a slash", env: map[string]string{envContext: "../x"}, wantSource: SourceEnv, wantReason: "path separator"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveContexts(tc.flags, false, bareAzUnset, tc.presets, envFunc(tc.env))
+			if err == nil {
+				t.Fatal("expected the name to be refused")
+			}
+			for _, want := range []string{string(tc.wantSource), tc.wantReason, "cloudctx list"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the error does not mention %q: %v", want, err)
+				}
+			}
+		})
+	}
+
+	// Only the source that wins is checked: a bad name in the environment is
+	// irrelevant when -c names a good one, and the shared-login preset member
+	// is a choice rather than a name.
+	badEnv := envFunc(map[string]string{envContext: "-x"})
+	if got, err := resolveContexts(
+		[]string{"contoso"},
+		false,
+		bareAzUnset,
+		nil,
+		badEnv,
+	); err != nil ||
+		got.Names[0] != "contoso" {
+		t.Errorf("-c should win without the environment being judged: %+v, %v", got, err)
+	}
+	if got, err := resolveContexts(nil, false, bareAzUnset, []string{""}, badEnv); err != nil || !got.Bare {
+		t.Errorf("a shared-login preset should not be judged as a name: %+v, %v", got, err)
+	}
+	if got, err := resolveContexts(
+		nil,
+		false,
+		bareAzUnset,
+		[]string{"", "contoso"},
+		badEnv,
+	); err != nil ||
+		len(got.Names) != 2 {
+		t.Errorf("a mixed preset's empty member is the shared login, not a bad name: %+v, %v", got, err)
+	}
+}
+
 func TestDescribeNamesTheSource(t *testing.T) {
 	r := resolution{Names: []string{"contoso"}, Source: SourceEnv}
 	if got := r.Describe(); !strings.Contains(got, "contoso") || !strings.Contains(got, envContext) {

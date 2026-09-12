@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -406,4 +407,156 @@ func TestTheVersionProbeIsCached(t *testing.T) {
 	if spawns != 1 {
 		t.Errorf("the version was probed %d times; the cache should make it once", spawns)
 	}
+}
+
+// TestARefusedVersionIsNotCached: the probe cache is keyed on the binary's
+// path, size and mtime, and a pipx or uv shim keeps all three across
+// `cloudctx self-update`. A refused version that was cached would therefore
+// stay refused for a day after the fix; so it is not cached, and the update is
+// seen on the very next command.
+func TestARefusedVersionIsNotCached(t *testing.T) {
+	stubCloudctx(t, "1.3.0", "acme")
+
+	spawns := 0
+	counting := func(name string, args ...string) ([]byte, []byte, error) {
+		if len(args) == 1 && args[0] == "--version" {
+			spawns++
+		}
+		return execRunner(name, args...)
+	}
+	for range 2 {
+		if err := RequireCloudctx(counting); !errors.Is(err, ErrCloudctxTooOld) {
+			t.Fatalf("err = %v, want ErrCloudctxTooOld", err)
+		}
+	}
+	if spawns != 2 {
+		t.Errorf("a refused version was probed %d times in 2 commands; it must not be cached", spawns)
+	}
+	probePath, err := versionProbePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(probePath); statErr == nil {
+		t.Error("a refused version was written to the probe cache")
+	}
+
+	updateStubInPlace(t, "1.3.0", MinCloudctxVersion)
+	if gateErr := RequireCloudctx(counting); gateErr != nil {
+		t.Errorf("the updated cloudctx is still refused: %v", gateErr)
+	}
+	// And the accepted version is what gets cached.
+	if gateErr := RequireCloudctx(counting); gateErr != nil {
+		t.Fatal(gateErr)
+	}
+	if spawns != 3 {
+		t.Errorf("after the update the version was probed %d times in total; the accepted one should be cached", spawns)
+	}
+}
+
+// updateStubInPlace is the update a pipx or uv shim hides from the probe
+// cache: the stub on PATH keeps its path, size and mtime while the version it
+// prints changes. from and to must be the same length so the size holds; the
+// mtime is put back by hand.
+func updateStubInPlace(t *testing.T, from, to string) {
+	t.Helper()
+	if len(from) != len(to) {
+		t.Fatalf("%q and %q differ in length, so the stub would change size", from, to)
+	}
+	bin, err := exec.LookPath(cloudctxBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(bin) //nolint:gosec // the stub this test wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.ReplaceAll(string(script), "cloudctx "+from, "cloudctx "+to)
+	if err = os.WriteFile(bin, []byte(updated), 0o700); err != nil { //nolint:gosec // it has to stay executable
+		t.Fatal(err)
+	}
+	if err = os.Chtimes(bin, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClearVersionProbeForgetsTheCachedVersion: `pimctl cache clear` promises
+// everything pimctl re-derives, and the probed version is one of those things.
+func TestClearVersionProbeForgetsTheCachedVersion(t *testing.T) {
+	stubCloudctx(t, MinCloudctxVersion, "acme")
+	if _, err := CloudctxVersion(execRunner); err != nil {
+		t.Fatal(err)
+	}
+	probePath, err := versionProbePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(probePath); statErr != nil {
+		t.Fatalf("the probe was not cached: %v", statErr)
+	}
+
+	removed, err := ClearVersionProbe()
+	if err != nil || !removed {
+		t.Fatalf("ClearVersionProbe = %v, %v; want a removal", removed, err)
+	}
+	if _, statErr := os.Stat(probePath); statErr == nil {
+		t.Error("the probe cache survived ClearVersionProbe")
+	}
+	// Nothing to remove is not an error.
+	if removed, err := ClearVersionProbe(); err != nil || removed {
+		t.Errorf("a second clear = %v, %v; want nothing removed and no error", removed, err)
+	}
+}
+
+// FuzzParseVersion: whatever `cloudctx --version` prints, the version read out
+// of it either is empty or starts with a numeric component — the gate compares
+// numerically, and a non-number would sort as 0 and pass as "old".
+func FuzzParseVersion(f *testing.F) {
+	for _, seed := range []string{"cloudctx 1.4.0\n", "cloudctx v1.4.0", "1.4.0", "cloudctx", "", "v.1", "a.b.c 2.0"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		got := parseVersion(in)
+		if got == "" {
+			return
+		}
+		first, _, _ := strings.Cut(got, ".")
+		if _, err := strconv.Atoi(first); err != nil {
+			t.Errorf("parseVersion(%q) = %q, whose first component is not a number", in, got)
+		}
+	})
+}
+
+// FuzzCompareVersions: the ordering the gate decides on has to be a total
+// order — every version equals itself, and swapping the operands flips the
+// sign — or two cloudctx versions could each be "older" than the other.
+func FuzzCompareVersions(f *testing.F) {
+	for _, seed := range [][2]string{
+		{"1.4.0", "1.4.0"},
+		{"1.3.0", "1.4.0"},
+		{"1.4.1", "1.4.0"},
+		{"2.0", "1.4.0"},
+		{"1.4", "1.4.0"},
+		{"1.10.0", "1.4.0"},
+		{"1.4.0rc1", "1.4.0"},
+		{"", "1"},
+		{"x", "y"},
+	} {
+		f.Add(seed[0], seed[1])
+	}
+	f.Fuzz(func(t *testing.T, a, b string) {
+		if got := compareVersions(a, a); got != 0 {
+			t.Errorf("compareVersions(%q, %q) = %d, want 0", a, a, got)
+		}
+		ab, ba := compareVersions(a, b), compareVersions(b, a)
+		if ab != -ba {
+			t.Errorf("compareVersions(%q, %q) = %d but compareVersions(%q, %q) = %d", a, b, ab, b, a, ba)
+		}
+		if ab < -1 || ab > 1 {
+			t.Errorf("compareVersions(%q, %q) = %d, outside -1..1", a, b, ab)
+		}
+	})
 }
