@@ -147,7 +147,7 @@ func TestAllTablesFitTheConsoleBudget(t *testing.T) {
 
 	// Plan + results, with a clamp note and a long failure detail. Every PUT is
 	// stubbed to fail, so the command itself must report an error.
-	out, _, err := runCmd(t, "activate", "-c", "contoso", "--all", "--hours", "9", "-j", "x", "-y")
+	out, _, err := runCmd(t, "activate", "-c", "contoso", "--all", "--for", "9h", "-j", "x", "-y")
 	if err == nil {
 		t.Fatal("activate should fail when every request is rejected")
 	}
