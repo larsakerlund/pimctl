@@ -40,6 +40,8 @@ const MinCloudctxVersion = "1.4.0"
 // avoid. Doing it on every command would double the cost of a warm one, so the
 // answer is kept on disk and re-probed daily — or immediately, whenever the
 // binary's path, size or mtime changes, which is what an update looks like.
+// A version below [MinCloudctxVersion] is never kept at all; see
+// [probeVersionCached] for why.
 const versionCacheTTL = 24 * time.Hour
 
 // pimctlStateDirName is the directory pimctl keeps per-context state in, inside
@@ -165,7 +167,13 @@ func probeVersionCached(run Runner) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if statErr == nil {
+	// A version the gate refuses is not persisted. The identity the cache is
+	// keyed on — path, size, mtime — is the binary's, and a pipx or uv shim
+	// does not change when the package behind it is updated: `cloudctx
+	// self-update` would leave the refusal in force for the rest of the day.
+	// Re-probing on every command is the right cost for a machine whose
+	// cloudctx is refused anyway, since nothing else is spawned after it.
+	if statErr == nil && compareVersions(version, MinCloudctxVersion) >= 0 {
 		writeVersionProbe(versionProbe{
 			Version:   version,
 			Path:      path,
@@ -260,6 +268,9 @@ func compareVersions(a, b string) int {
 	return 0
 }
 
+// versionProbeName is the probe cache's filename inside [store.Dir].
+const versionProbeName = "cloudctx-version.json"
+
 // versionProbePath is where the probe cache lives: one file for the machine,
 // beside the other caches rather than in a context's store, because the
 // question it answers is about the binary and not about any context.
@@ -268,7 +279,17 @@ func versionProbePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "cloudctx-version.json"), nil
+	return filepath.Join(dir, versionProbeName), nil
+}
+
+// ClearVersionProbe removes the probe cache and reports whether a file went,
+// for `pimctl cache clear`: the version is something pimctl re-derives, and a
+// cleared cache that still trusted yesterday's answer would not be cleared.
+// The error is the cache directory being unreadable; a missing file or
+// directory is nothing to remove and no error.
+func ClearVersionProbe() (bool, error) {
+	n, err := store.RemoveFiles(versionProbeName)
+	return n > 0, err
 }
 
 // readVersionProbe returns the cached version when it was read from this exact

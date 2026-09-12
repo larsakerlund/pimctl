@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +41,52 @@ func TestCacheClearRemovesBothCachesAndSaysWhatItDidNotDo(t *testing.T) {
 	}
 	if _, _, ok := cache.Read(testOwner("contoso")); ok {
 		t.Error("the listing cache survived")
+	}
+}
+
+// TestCacheClearForgetsTheProbedCloudctxVersion: the version probe is the
+// fourth thing pimctl re-derives, and `cache clear` promises all of them. It
+// says so only when there was one to forget, so a machine without cloudctx is
+// not told about a tool it does not have.
+func TestCacheClearForgetsTheProbedCloudctxVersion(t *testing.T) {
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	dir := filepath.Join(cacheHome, "pimctl")
+	if err := os.MkdirAll(dir, store.DirMode); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(dir, "cloudctx-version.json")
+	if err := os.WriteFile(probe, []byte(`{"version":"1.4.0"}`), store.SecretFileMode); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runCmd(t, "cache", "clear")
+	if err != nil {
+		t.Fatalf("cache clear: %v", err)
+	}
+	if _, statErr := os.Stat(probe); statErr == nil {
+		t.Error("the probed cloudctx version survived `cache clear`")
+	}
+	if !strings.Contains(out, "cloudctx version") {
+		t.Errorf("cache clear must say it forgot the version:\n%s", out)
+	}
+
+	// With nothing to forget, nothing is said about it.
+	out, _, err = runCmd(t, "cache", "clear")
+	if err != nil {
+		t.Fatalf("second cache clear: %v", err)
+	}
+	if strings.Contains(out, "cloudctx version") {
+		t.Errorf("nothing was forgotten this time, so nothing should be said:\n%s", out)
+	}
+
+	// And the help lists it among what is cleared.
+	help, _, err := runCmd(t, "cache", "clear", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(help, "cloudctx version") {
+		t.Errorf("the help does not mention the cloudctx version:\n%s", help)
 	}
 }
 

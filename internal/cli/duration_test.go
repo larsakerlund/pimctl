@@ -123,11 +123,51 @@ func TestParseFriendlyDuration(t *testing.T) {
 			t.Errorf("ParseFriendlyDuration(%q) = %v, want %v", in, got, want)
 		}
 	}
-	for _, bad := range []string{"", "two hours", "2 hours", "h", "2x", "-2h", "PT", "2h30"} {
+	// P107000D is enough days to overflow time.Duration into a negative number,
+	// which is not a duration anyone meant.
+	for _, bad := range []string{"", "two hours", "2 hours", "h", "2x", "-2h", "PT", "2h30", "P107000D"} {
 		if _, err := parseFriendlyDuration(bad); err == nil {
 			t.Errorf("ParseFriendlyDuration(%q) should have failed", bad)
 		}
 	}
+}
+
+// FuzzParseFriendlyDuration: whatever is typed after --for must not panic, and
+// what parses must be a non-negative duration; "0m" parses as zero by design,
+// and requestedDuration is what turns that into the "greater than zero" error.
+func FuzzParseFriendlyDuration(f *testing.F) {
+	for _, seed := range []string{
+		"2h", "90m", "1h30m", "45s", "1h30m10s", "PT2H30M", "pt1h", "P1D", " 2h ", "2H",
+		"", "two hours", "2 hours", "h", "2x", "-2h", "PT", "2h30", "0m", "PT0S", "P99999999999D",
+		"P107000D", // enough days to overflow time.Duration into a negative.
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		d, err := parseFriendlyDuration(in)
+		if err != nil {
+			return
+		}
+		if d < 0 {
+			t.Errorf("parseFriendlyDuration(%q) = %v, a negative duration with no error", in, d)
+		}
+	})
+}
+
+// FuzzRequestedDurationFor: the contract --for is held to. A value that is
+// accepted is strictly positive, because zero means "the policy maximum" to
+// the code downstream and must never be reached by typing it.
+func FuzzRequestedDurationFor(f *testing.F) {
+	for _, seed := range []string{"2h", "1h30m", "PT2H30M", "0m", "PT0S", "banana", "", "P99999999999D"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		cmd := durationCmd(t, map[string]string{"for": in})
+		d, err := requestedDuration(cmd, in, 0, "")
+		if err == nil && d <= 0 {
+			t.Errorf("requestedDuration(--for %q) = %v with no error; zero would mean the policy maximum", in, d)
+		}
+	})
 }
 
 func TestRequestedDurationFor(t *testing.T) {

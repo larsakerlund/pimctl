@@ -39,16 +39,27 @@ type azProfile struct {
 // expectedAccount reads the account used by a token invocation. Named contexts
 // use the companion contract's $CLOUDCTX_STORE/azure directory and must agree
 // with any pinned tenant. Unknown identities disable cache reuse.
+//
+// Inside a `cloudctx use` window for the named context the store comes from
+// the environment and nothing is spawned: `cloudctx show` costs a 0.65 s
+// process launch, which on the warm path is the whole cost of the command. The
+// pinned-tenant cross-check is skipped there, because the tenant is only
+// known from `show`; the token is still checked against the profile's tenant
+// and user by [cachedTokenFor], which is the check that catches a repointed
+// or re-logged-in context.
 func expectedAccount(name string, run Runner) (azAccount, bool) {
 	var dir, pinnedTenant string
-	if name == "" {
+	switch {
+	case name == "":
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return azAccount{}, false
 		}
 		// A shared az child has AZURE_CONFIG_DIR stripped by childEnv.
 		dir = filepath.Join(home, ".azure")
-	} else {
+	case ambientStore(name) != "":
+		dir = filepath.Join(ambientStore(name), "azure")
+	default:
 		info, err := ShowContext(name, run)
 		if err != nil || info.Store == "" {
 			return azAccount{}, false

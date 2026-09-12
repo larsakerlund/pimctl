@@ -17,14 +17,14 @@ import (
 )
 
 // newCacheCmd builds `pimctl cache`, whose help is the one place a user is
-// told the whole on-disk layout: the three caches, the activation record that
+// told the whole on-disk layout: the four caches, the activation record that
 // is not one of them, and which of them live inside a cloudctx context's store
 // rather than under pimctl's own XDG directories.
 func newCacheCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cache",
 		Short: "Inspect and clear pimctl's local caches",
-		Long: `pimctl caches three things on disk:
+		Long: `pimctl caches four things on disk:
 
   * the ARM access token per context, so every command does not pay for a
     cloudctx/az process launch — 0600 in a 0700 directory, and refused on read
@@ -32,6 +32,8 @@ func newCacheCmd() *cobra.Command {
   * the eligible-role listing per context, for ` + cache.TTLHuman + `
   * each role's PIM policy per (scope, role), for 24 hours — two ARM calls that
     otherwise land on the critical path of every activation
+  * the installed cloudctx's version, for 24 hours or until the binary changes,
+    so the version gate does not cost a ` + "`cloudctx --version`" + ` launch per command
 
 Activation state is never cached. What pimctl does keep is a record of the
 activations it performed itself, so ` + "`status`" + ` can answer instantly; it is
@@ -55,9 +57,10 @@ func newCacheClearCmd() *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
 		Use:   "clear",
-		Short: "Delete cached tokens, role listings and policies",
-		Long: `Delete everything pimctl re-derives: cached tokens, role listings and
-policies. The next command pays the full cost and is correct.
+		Short: "Delete cached tokens, role listings, policies and the cloudctx version",
+		Long: `Delete everything pimctl re-derives: cached tokens, role listings, policies
+and the probed cloudctx version. The next command pays the full cost and is
+correct.
 
 The record of activations pimctl performed is NOT a cache and is left alone.
 Azure's own listing runs minutes behind an activation, and that record is what
@@ -90,9 +93,12 @@ func newLogoutCmd() *cobra.Command {
 }
 
 // runCacheClear deletes the cached tokens, eligibility listings and policy
-// files, and prints how many of each went. It does not touch the activation
-// record unless all is set, because Azure's listing runs minutes behind an
-// activation and the record is what keeps `status` right in the meantime.
+// files, and prints how many of each went; the probed cloudctx version goes
+// too, with its own line when there was one, so the next command's
+// `cloudctx --version` launch is not a surprise. It does not touch the
+// activation record unless all is set, because Azure's listing runs minutes
+// behind an activation and the record is what keeps `status` right in the
+// meantime.
 //
 // With all set it deletes every context's record — naming the contexts, since
 // the record is cleared machine-wide rather than only for the context this
@@ -112,9 +118,16 @@ func runCacheClear(cmd *cobra.Command, all bool) error {
 	if err != nil {
 		return err
 	}
+	probed, err := azauth.ClearVersionProbe()
+	if err != nil {
+		return err
+	}
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Cleared %d cached token(s), %d role listing(s) and %d policy file(s).\n",
 		tokens, listings, policies)
+	if probed {
+		fmt.Fprintln(out, "Forgot the probed cloudctx version; the next command runs `cloudctx --version` again.")
+	}
 	if all {
 		records, contexts, recErr := clearRecords()
 		if recErr != nil {
