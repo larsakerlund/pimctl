@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -589,5 +590,146 @@ func TestClaimsChallengeDropsTheCachedToken(t *testing.T) {
 	}
 	if readTokenCache(t, "globex") != nil {
 		t.Fatal("the cached token survived the claims challenge")
+	}
+}
+
+// slowMintRunner wraps the fake registry with a mint that takes a fixed time,
+// so a test can tell contexts opened together from contexts opened one after
+// another. Everything that is not a token mint — the registry reads, the
+// version probe — goes straight to the fake, which answers at once. A context
+// whose name says it is broken fails the way an expired login does, without
+// the wait. Counters are guarded, because the mints it stands in for are
+// spawned from several goroutines at once.
+type slowMintRunner struct {
+	mu       sync.Mutex // guards the counters below.
+	inFlight int        // mints running right now.
+	peak     int        // the most that ran at once.
+	mints    int        // mints started, broken ones included.
+	delay    time.Duration
+	registry azauth.Runner
+}
+
+// run is the [azauth.Runner] the test installs.
+func (r *slowMintRunner) run(name string, args ...string) (stdout, stderr []byte, err error) {
+	joined := name + " " + strings.Join(args, " ")
+	if !strings.Contains(joined, "get-access-token") {
+		return r.registry(name, args...)
+	}
+	r.mu.Lock()
+	r.mints++
+	r.inFlight++
+	r.peak = max(r.peak, r.inFlight)
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlight--
+		r.mu.Unlock()
+	}()
+	if strings.Contains(joined, "broken") {
+		return nil, []byte("AADSTS700082: refresh token has expired"), errors.New("exit status 1")
+	}
+	time.Sleep(r.delay)
+	return r.registry(name, args...)
+}
+
+// TestOpenSessionsWithOpensContextsTogether: each context costs a `cloudctx
+// show` and, cold, a mint, and `--all-contexts` over N of them one after
+// another waits N times that. Three contexts whose mints each take 100 ms have
+// to open in well under 300 ms, which means at once — and still come out, with
+// their failures and their --debug lines, in the order they were named rather
+// than the order the mints happened to finish.
+func TestOpenSessionsWithOpensContextsTogether(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	installFakeRunner(t, []string{"alpha", "beta", "gamma"})
+	runner := &slowMintRunner{delay: 100 * time.Millisecond, registry: azauth.DefaultRunner}
+	azauth.DefaultRunner = runner.run
+	t.Cleanup(func() { azauth.DefaultRunner = runner.registry })
+
+	names := []string{"alpha", "broken-one", "beta", "broken-two", "gamma"}
+	timings := newTimings(true)
+	start := time.Now()
+	sessions, failures, err := openSessionsWith(resolution{Names: names, Source: SourceFlag}, timings, false)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("three good contexts must open: %v", err)
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Errorf("opening three contexts took %v, which is one after another, not together", elapsed)
+	}
+	runner.mu.Lock()
+	peak, mints := runner.peak, runner.mints
+	runner.mu.Unlock()
+	if peak < 2 {
+		t.Errorf("no two mints ever ran at once; the contexts were opened one after another")
+	}
+	if mints != len(names) {
+		t.Errorf("minted %d times for %d contexts", mints, len(names))
+	}
+
+	got := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		got = append(got, s.Context)
+	}
+	if want := []string{"alpha", "beta", "gamma"}; !slices.Equal(got, want) {
+		t.Errorf("sessions came out as %v, want %v — the order the contexts were named", got, want)
+	}
+	if len(failures) != 2 || !strings.Contains(failures[0].Error(), "broken-one") ||
+		!strings.Contains(failures[1].Error(), "broken-two") {
+		t.Errorf("failures are not in the order the contexts were named: %v", failures)
+	}
+	var report strings.Builder
+	timings.Report(&report, elapsed)
+	text := report.String()
+	last := -1
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		i := strings.Index(text, "token "+name+": ")
+		if i < last {
+			t.Errorf("the --debug notes are not in the order the contexts were named:\n%s", text)
+			break
+		}
+		last = i
+	}
+	last = -1
+	for _, name := range names {
+		i := strings.Index(text, "token ("+name+")")
+		if i < last {
+			t.Errorf("the --debug spans are not in the order the contexts were named:\n%s", text)
+			break
+		}
+		last = i
+	}
+}
+
+// TestOpenSessionsWithOpensOneContextInline: a single context — the common
+// case, every `-c` and every bare az run — is opened on the calling goroutine,
+// with no fan-out to pay for. The observable half of that is that it still
+// opens, still mints once, and still reports as before.
+func TestOpenSessionsWithOpensOneContextInline(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	installFakeRunner(t, []string{"contoso"})
+	runner := &slowMintRunner{registry: azauth.DefaultRunner}
+	azauth.DefaultRunner = runner.run
+	t.Cleanup(func() { azauth.DefaultRunner = runner.registry })
+
+	timings := newTimings(true)
+	sessions, failures, err := openSessionsWith(
+		resolution{Names: []string{"contoso"}, Source: SourceFlag},
+		timings,
+		false,
+	)
+	if err != nil || len(failures) != 0 || len(sessions) != 1 || sessions[0].Context != "contoso" {
+		t.Fatalf("one context: sessions=%d failures=%v err=%v", len(sessions), failures, err)
+	}
+	runner.mu.Lock()
+	mints := runner.mints
+	runner.mu.Unlock()
+	if mints != 1 {
+		t.Errorf("minted %d times for one context", mints)
+	}
+	var report strings.Builder
+	timings.Report(&report, time.Second)
+	if !strings.Contains(report.String(), "token (contoso)") ||
+		!strings.Contains(report.String(), "token contoso: miss") {
+		t.Errorf("the --debug breakdown lost the token line:\n%s", report.String())
 	}
 }

@@ -8,8 +8,12 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -531,5 +535,115 @@ func TestOpenRequestIsNotRecordedAsHeld(t *testing.T) {
 	}}})
 	if len(rows) != 0 {
 		t.Fatalf("status would show %d roles from the record, want none", len(rows))
+	}
+}
+
+// TestConcurrentRecordWritersLoseNothing: an `up` landing activations while a
+// `down` writes tombstones for other roles are two processes each reading the
+// record, merging their own entries and publishing. Both writes go through the
+// record's lock, so neither publishes over the other's entries; without it the
+// last writer would win and whatever the other wrote would be gone. flock(2) is
+// held per open file description, so two goroutines each taking the sidecar
+// stand in for two processes.
+func TestConcurrentRecordWritersLoseNothing(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	owner := testOwner("contoso")
+	const perWriter = 25
+	end := time.Now().Add(time.Hour)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range perWriter {
+			recordActivations([]result{{
+				Owner: owner, Context: "contoso", Role: "Cost Management Contributor",
+				Scope:            fmt.Sprintf("/providers/Microsoft.Management/managementGroups/up-%d", i),
+				RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + costGUID,
+				Outcome:          OutcomeActivated, Until: &end,
+			}})
+		}
+	})
+	wg.Go(func() {
+		for i := range perWriter {
+			forgetActivations([]result{{
+				Owner: owner, Context: "contoso", Role: "Resource Policy Contributor",
+				Scope:            fmt.Sprintf("/providers/Microsoft.Management/managementGroups/down-%d", i),
+				RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + contribGUID,
+				Outcome:          OutcomeDeactivated,
+			}})
+		}
+	})
+	wg.Wait()
+
+	var held, revoked int
+	for _, e := range readRecord(owner) {
+		if e.Revoked() {
+			revoked++
+		} else {
+			held++
+		}
+	}
+	if held != perWriter || revoked != perWriter {
+		t.Fatalf("the record holds %d activations and %d tombstones after %d of each were written concurrently; "+
+			"one writer overwrote the other", held, revoked, perWriter)
+	}
+}
+
+// TestEveryRecordWriterWaitsForTheLock: the three things that rewrite the
+// record — an activation landing, a deactivation's tombstone, and the
+// reconciliation after a listing — each read the file, derive the new contents
+// from what they read and publish. Every one of them has to do that under the
+// record's lock, or another process's write between its read and its publish
+// is lost. The proof is direct: with the sidecar held, none of them completes
+// until it is let go. flock(2) is held per open file description, so the
+// test's own lock stands in for another process.
+func TestEveryRecordWriterWaitsForTheLock(t *testing.T) {
+	owner := testOwner("contoso")
+	end := time.Now().Add(time.Hour)
+	activation := result{
+		Owner: owner, Context: "contoso", Role: "Cost Management Contributor",
+		Scope:            "/providers/Microsoft.Management/managementGroups/contoso-prod",
+		RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + costGUID,
+		Outcome:          OutcomeActivated, Until: &end,
+	}
+	for _, tc := range []struct {
+		name  string
+		write func()
+	}{
+		{"activation", func() { recordActivations([]result{activation}) }},
+		{"tombstone", func() {
+			gone := activation
+			gone.Outcome = OutcomeDeactivated
+			forgetActivations([]result{gone})
+		}},
+		{"reconciliation", func() { reconcileRecord(owner, nil, nil, nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			path, err := recordPath(owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			unlock := lockRecord(path)
+
+			done := make(chan struct{})
+			go func() {
+				tc.write()
+				close(done)
+			}()
+			select {
+			case <-done:
+				t.Fatal("the write went ahead while another process held the record's lock")
+			case <-time.After(100 * time.Millisecond):
+			}
+			unlock()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the write never completed after the lock was released")
+			}
+		})
 	}
 }

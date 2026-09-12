@@ -108,8 +108,16 @@ func buildPlan(
 			// path of the command people run most. A persisted copy skips them.
 			s := cache.LookupPolicy(owner, scope, roleDef, refresh)
 			if s == nil {
-				var err error
-				if s, err = item.Session.Client.GetRoleSettings(ctx, scope, roleDef); err != nil {
+				// The policy read is the first ARM call an `up` makes, so a
+				// cached token ARM has stopped accepting is rejected here
+				// before anywhere else; it gets the same one refresh the
+				// request and its polls do.
+				err := retryOn401(item.Session, func() error {
+					var e error
+					s, e = item.Session.Client.GetRoleSettings(ctx, scope, roleDef)
+					return e
+				})
+				if err != nil {
 					item.PrepErr = fmt.Errorf("could not read the PIM policy: %w", err)
 					return
 				}

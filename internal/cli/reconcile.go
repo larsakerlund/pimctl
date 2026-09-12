@@ -25,7 +25,9 @@ import (
 // succeeded. The file is a few KB, so the repeated read-merge-write costs
 // nothing worth optimising.
 //
-// Callers serialise this; see executeActivations.
+// Callers serialise this within one process; see executeActivations. Another
+// pimctl writing the same record at the same time is kept out by the lock
+// updateRecord holds across each read-merge-write.
 func recordResult(r result) {
 	switch r.Outcome {
 	case OutcomeActivated, OutcomeAlreadyActive:
@@ -70,7 +72,9 @@ func recordActivations(results []result) {
 		byContext[r.Owner] = append(byContext[r.Owner], entry)
 	}
 	for context, fresh := range byContext {
-		writeRecord(context, mergeEntries(readRecord(context), fresh))
+		updateRecord(context, func(existing []recordEntry) []recordEntry {
+			return mergeEntries(existing, fresh)
+		})
 	}
 }
 
@@ -101,7 +105,9 @@ func forgetActivations(results []result) {
 		byContext[r.Owner] = append(byContext[r.Owner], entry)
 	}
 	for context, gone := range byContext {
-		writeRecord(context, mergeEntries(readRecord(context), gone))
+		updateRecord(context, func(existing []recordEntry) []recordEntry {
+			return mergeEntries(existing, gone)
+		})
 	}
 }
 
@@ -131,9 +137,10 @@ func reconcileRecord(
 			listed[recordKey(a.Context, a.Assignment.Properties.Scope, a.Assignment.Properties.RoleDefinitionID)] = a
 		}
 	}
-	previous := readRecord(owner)
-	kept, revoked := keepAgainstListing(previous, listed, unknown, verdicts)
-	writeRecord(owner, mergeEntries(kept, listedEntries(context, active, previous, revoked)))
+	updateRecord(owner, func(previous []recordEntry) []recordEntry {
+		kept, revoked := keepAgainstListing(previous, listed, unknown, verdicts)
+		return mergeEntries(kept, listedEntries(context, active, previous, revoked))
+	})
 }
 
 // keepAgainstListing decides which existing entries survive a listing, and
