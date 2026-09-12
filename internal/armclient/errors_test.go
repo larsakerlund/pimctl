@@ -28,6 +28,31 @@ func TestParseAPIErrorAlreadyActive(t *testing.T) {
 	if e := ParseAPIError("PUT", "/x", 400, body, http.Header{}); e.Kind != KindAlreadyActive {
 		t.Fatalf("message-based detection failed: kind = %v", e.Kind)
 	}
+
+	// The schedule behind an assignment being in place is the same condition.
+	body = []byte(`{"error":{"code":"RoleAssignmentScheduleExists","message":"exists"}}`)
+	if e := ParseAPIError("PUT", "/x", 400, body, http.Header{}); e.Kind != KindAlreadyActive {
+		t.Fatalf("RoleAssignmentScheduleExists kind = %v, want KindAlreadyActive", e.Kind)
+	}
+}
+
+// TestParseAPIErrorRequestExists: a request that exists is not a role that is
+// held. ARM sends these while an earlier request is undecided — typically one
+// waiting on an approver — and reading them as already-active would exit 0 for
+// access nobody has.
+func TestParseAPIErrorRequestExists(t *testing.T) {
+	for _, code := range []string{"RoleAssignmentRequestExists", "RoleAssignmentScheduleRequestExists"} {
+		// The message deliberately carries an already-active phrase: the code
+		// has to win over the wording.
+		body := []byte(`{"error":{"code":"` + code + `","message":"The principal already has an active request."}}`)
+		e := ParseAPIError("PUT", "/x", 400, body, http.Header{})
+		if e.Kind != KindRequestExists {
+			t.Errorf("%s kind = %v, want KindRequestExists", code, e.Kind)
+		}
+		if e.Kind == KindAlreadyActive {
+			t.Errorf("%s must not be mistaken for already-active", code)
+		}
+	}
 }
 
 func TestParseAPIErrorPolicyValidation(t *testing.T) {

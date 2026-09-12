@@ -117,7 +117,16 @@ func askAll(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			v := verdictUnknown
-			if sr, err := q.session.Client.GetRequest(ctx, q.requestID); err == nil {
+			// Through retryOn401 like every other read: a cached token ARM
+			// has stopped accepting is dropped and replaced once, rather
+			// than turning every verdict into "unknown" until it expires.
+			var sr *armclient.ScheduleRequest
+			err := retryOn401(q.session, func() error {
+				var e error
+				sr, e = q.session.Client.GetRequest(ctx, q.requestID)
+				return e
+			})
+			if err == nil {
 				v = verdictFor(sr)
 			}
 			mu.Lock()
@@ -143,8 +152,8 @@ func verdictFor(sr *armclient.ScheduleRequest) entryVerdict {
 	switch sr.Properties.Status {
 	case armclient.StatusProvisioned, armclient.StatusGranted:
 		return verdictHeld
-	case armclient.StatusRevoked, armclient.StatusCanceled,
-		"Denied", "Failed", "Expired", "RevokedAndCanceled", "AdminDenied":
+	case armclient.StatusRevoked, armclient.StatusCanceled, armclient.StatusExpired,
+		armclient.StatusRevokedAndCanceled, "Denied", "Failed", "AdminDenied":
 		return verdictGone
 	default:
 		// Accepted, PendingApproval, Provisioning and anything new: ARM has not

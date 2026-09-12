@@ -8,8 +8,13 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -225,6 +230,262 @@ func TestClassifyRequest(t *testing.T) {
 	}
 }
 
+// TestClassifyRequestRevokedOrExpiredIsOver: an activation that ended Revoked,
+// RevokedAndCanceled or Expired is over, not stalled — FAILED, worded as such,
+// never "still Revoked after". Revoked stays the success of a deactivation.
+func TestClassifyRequestRevokedOrExpiredIsOver(t *testing.T) {
+	mk := func(status string) *armclient.ScheduleRequest {
+		sr := &armclient.ScheduleRequest{}
+		sr.Properties.Status = status
+		return sr
+	}
+	for _, tc := range []struct{ status, want string }{
+		{"Revoked", "revoked"},
+		{"RevokedAndCanceled", "revoked"},
+		{"Expired", "expired"},
+	} {
+		got := classifyRequest(result{}, mk(tc.status), false, OutcomeActivated, defaultTimeouts().poll)
+		if got.Outcome != OutcomeFailed || !strings.Contains(got.Detail, tc.want) ||
+			strings.Contains(got.Detail, "still ") {
+			t.Errorf("%s activation -> %s / %q, want FAILED worded as %s", tc.status, got.Outcome, got.Detail, tc.want)
+		}
+		if !strings.Contains(got.Detail, tc.status) {
+			t.Errorf("%s activation: ARM's own status is missing from %q", tc.status, got.Detail)
+		}
+	}
+	got := classifyRequest(result{}, mk("Revoked"), false, OutcomeDeactivated, defaultTimeouts().poll)
+	if got.Outcome != OutcomeDeactivated {
+		t.Errorf("Revoked deactivation -> %s / %q, want DEACTIVATED", got.Outcome, got.Detail)
+	}
+}
+
+// TestClassifyUnreadKeepsATerminalAnswer: when the poll ends on a read error,
+// the last status ARM did return decides. A terminal one is classified as
+// usual, so a good final status still reaches the record; a non-terminal one
+// is STILL PENDING with the error in the detail, never FAILED.
+func TestClassifyUnreadKeepsATerminalAnswer(t *testing.T) {
+	sr := &armclient.ScheduleRequest{}
+	sr.Properties.Status = "Provisioned"
+	got := classifyUnread(result{Status: "Provisioned"}, sr, errors.New("boom"), OutcomeActivated, time.Minute)
+	if got.Outcome != OutcomeActivated {
+		t.Errorf("a provisioned request with a later read error -> %s / %q, want ACTIVATED", got.Outcome, got.Detail)
+	}
+	sr.Properties.Status = "Accepted"
+	got = classifyUnread(result{Status: "Accepted"}, sr, errors.New("boom"), OutcomeActivated, time.Minute)
+	if got.Outcome != OutcomeWaiting {
+		t.Errorf("an unread request -> %s, want STILL PENDING", got.Outcome)
+	}
+	for _, want := range []string{"Accepted", "boom", "pimctl status"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("detail %q is missing %q", got.Detail, want)
+		}
+	}
+	if exitCodeFor([]result{got}) != ExitFailed {
+		t.Error("an unread request must exit 1 like a stalled one")
+	}
+}
+
+// pollReadErrorSession is an ARM stand-in that accepts every request as
+// PendingProvisioning and then refuses to read it back, which is the shape of
+// a poll that ends on an error rather than a status.
+func pollReadErrorSession(t *testing.T) *session {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(t, w, map[string]any{
+				"id": r.URL.Path, "properties": map[string]any{"status": "PendingProvisioning"},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"code":"ReadBackFailed","message":"the read-back failed"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	tok := &azauth.Token{Context: "contoso", AccessToken: "t", TenantID: "tid-1", PrincipalID: "oid-1"}
+	return &session{Context: "contoso", Token: tok, Client: armclient.New(srv.URL, tok.AccessToken, srv.Client())}
+}
+
+// assertUnreadOutcome checks a result for a request whose read-back failed.
+func assertUnreadOutcome(t *testing.T, what string, got result) {
+	t.Helper()
+	if got.Outcome != OutcomeWaiting {
+		t.Fatalf("%s whose read-back failed -> %s / %q, want STILL PENDING", what, got.Outcome, got.Detail)
+	}
+	if got.Status != "PendingProvisioning" {
+		t.Errorf("%s: status = %q, want the last observed status", what, got.Status)
+	}
+	for _, want := range []string{"PendingProvisioning", "the read-back failed", "pimctl status"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("%s: detail %q is missing %q", what, got.Detail, want)
+		}
+	}
+}
+
+// TestPollReadErrorIsNotReportedAsFailed: ARM accepted the request, so a GET
+// that then fails says nothing about whether the role was granted. The row must
+// read like a timed-out poll — exit 1, last status, "check pimctl status" —
+// not FAILED, which would claim the access is not held.
+func TestPollReadErrorIsNotReportedAsFailed(t *testing.T) {
+	s := pollReadErrorSession(t)
+	item := &planItem{
+		Row:         row{Context: "contoso", Elig: twoLowImpactRoles()[0]},
+		Session:     s,
+		Duration:    time.Hour,
+		RequestName: "11111111-1111-1111-1111-111111111111",
+	}
+	assertUnreadOutcome(
+		t,
+		"an activation",
+		activateOne(context.Background(), item, "why", "", "", false, 5*time.Second),
+	)
+
+	down := target{
+		Session:          s,
+		Context:          "contoso",
+		Scope:            mgScope,
+		RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + costGUID,
+		RoleName:         "Cost Management Contributor",
+	}
+	assertUnreadOutcome(t, "a deactivation", deactivateOne(context.Background(), down, false, 5*time.Second))
+}
+
+// TestSubmitReplacesARejectedCachedToken: a 401 on the PUT gets the same
+// treatment as one on a listing. The cached token is dropped and replaced
+// once, the request is sent again with the new one, and the stale entry never
+// comes back.
+func TestSubmitReplacesARejectedCachedToken(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	installFakeRunner(t, []string{"contoso"})
+	azauth.WriteTokenCache(&azauth.Token{
+		Context:     "contoso",
+		AccessToken: "stale-token",
+		ExpiresOn:   time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000"),
+		Tenant:      "tid-1",
+		TenantID:    "tid-1",
+		PrincipalID: "oid-1",
+	}, azauth.DefaultRunner)
+	tok := readTokenCache(t, "contoso")
+	if tok == nil || !tok.FromCache {
+		t.Fatal("the stale token should have been readable from the cache")
+	}
+
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		mu.Lock()
+		seen = append(seen, auth)
+		mu.Unlock()
+		if auth == "stale-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":{"code":"ExpiredAuthenticationToken","message":"rejected"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(t, w, map[string]any{"id": r.URL.Path, "properties": map[string]any{"status": "Provisioned"}})
+	}))
+	t.Cleanup(srv.Close)
+
+	s := &session{Context: "contoso", Token: tok, Client: armclient.New(srv.URL, tok.AccessToken, srv.Client())}
+	item := &planItem{
+		Row:         row{Context: "contoso", Elig: twoLowImpactRoles()[0]},
+		Session:     s,
+		Duration:    time.Hour,
+		RequestName: "22222222-2222-2222-2222-222222222222",
+	}
+	got := activateOne(context.Background(), item, "why", "", "", false, 5*time.Second)
+	if got.Outcome != OutcomeActivated {
+		t.Fatalf("a 401 on a cached token should self-heal, got %s / %q", got.Outcome, got.Detail)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || seen[0] != "stale-token" || seen[1] == "stale-token" {
+		t.Fatalf("expected the stale token once and a fresh one once, saw %q", seen)
+	}
+	if c := readTokenCache(t, "contoso"); c != nil && c.AccessToken == "stale-token" {
+		t.Error("the rejected token is still cached")
+	}
+}
+
+// TestApplyRequestErrorRequestExists: an open request is not a held role —
+// FAILED, exit 1, and the user is pointed at status rather than told the role
+// is active. The existing window's end time is not borrowed either, because
+// there is no window.
+func TestApplyRequestErrorRequestExists(t *testing.T) {
+	sess := &session{Context: "contoso", Token: &azauth.Token{Context: "contoso", TenantID: "tid-1"}}
+	for _, code := range []string{"RoleAssignmentRequestExists", "RoleAssignmentScheduleRequestExists"} {
+		until := time.Now().Add(time.Hour)
+		ae := armclient.ParseAPIError("PUT", "/x", 400,
+			[]byte(`{"error":{"code":"`+code+`","message":"A request already exists."}}`), nil)
+		res := applyRequestError(result{Role: "Contributor"}, sess, ae, &until)
+		if res.Outcome != OutcomeFailed || !res.IsFailure() {
+			t.Errorf("%s: outcome = %s, want FAILED", code, res.Outcome)
+		}
+		for _, want := range []string{"request exists", code, "not held", "pimctl status", "pimctl help"} {
+			if !strings.Contains(res.Detail, want) {
+				t.Errorf("%s: detail %q is missing %q", code, res.Detail, want)
+			}
+		}
+		if res.Until != nil {
+			t.Errorf("%s: an open request must not carry a window end", code)
+		}
+	}
+}
+
+// TestApplyRequestErrorClaimsChallenge: a claims challenge produces the exact
+// recovery command, points at --refresh, and deletes the cached token that can
+// never satisfy it.
+func TestApplyRequestErrorClaimsChallenge(t *testing.T) {
+	// Deleting the token resolves the context's store: never against a real
+	// cloudctx.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	installFakeRunner(t, []string{"contoso"})
+	sess := &session{
+		Context: "contoso",
+		Token:   &azauth.Token{Context: "contoso", TenantID: "11111111-2222-3333-4444-555555555555"},
+	}
+	azauth.WriteTokenCache(&azauth.Token{
+		Context:     "contoso",
+		AccessToken: "cached",
+		ExpiresOn:   time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000"),
+		Tenant:      "tid-1",
+		TenantID:    "tid-1",
+		PrincipalID: "oid-1",
+	}, azauth.DefaultRunner)
+	cachePath, err := azauth.TokenCachePath("contoso", azauth.DefaultRunner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("the token cache was not written: %v", err)
+	}
+
+	claims := `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`
+	ae := armclient.ParseAPIError("PUT", "/x", 403,
+		[]byte(`{"error":{"code":"RoleAssignmentRequestAcrsValidationFailed","message":"claims=`+
+			strings.ReplaceAll(claims, `"`, `\"`)+`"}}`), nil)
+	res := applyRequestError(result{}, sess, ae, nil)
+	if res.Outcome != OutcomeFailed {
+		t.Fatalf("outcome = %s", res.Outcome)
+	}
+	if !strings.HasPrefix(
+		res.Recovery,
+		"cloudctx exec contoso -- az login --tenant 11111111-2222-3333-4444-555555555555",
+	) {
+		t.Errorf("recovery command = %q", res.Recovery)
+	}
+	if !strings.Contains(res.Recovery, "--claims-challenge") {
+		t.Errorf("recovery command has no claims challenge: %q", res.Recovery)
+	}
+	if !strings.Contains(res.Detail, "--refresh") {
+		t.Errorf("the claims-challenge detail should point at --refresh: %q", res.Detail)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Errorf("the cached token must be gone after a claims challenge; stat: %v", err)
+	}
+}
+
 func TestApplyRequestErrorMapping(t *testing.T) {
 	sess := &session{
 		Context: "contoso",
@@ -258,25 +519,6 @@ func TestApplyRequestErrorMapping(t *testing.T) {
 	}
 	if !strings.Contains(res.Detail, "MfaRule") || !strings.Contains(res.Detail, "ExpirationRule") {
 		t.Errorf("failing rules not surfaced: %q", res.Detail)
-	}
-
-	// A claims challenge produces the exact recovery command.
-	claims := `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`
-	ae = armclient.ParseAPIError("PUT", "/x", 403,
-		[]byte(`{"error":{"code":"RoleAssignmentRequestAcrsValidationFailed","message":"claims=`+
-			strings.ReplaceAll(claims, `"`, `\"`)+`"}}`), nil)
-	res = applyRequestError(result{}, sess, ae, nil)
-	if res.Outcome != OutcomeFailed {
-		t.Fatalf("outcome = %s", res.Outcome)
-	}
-	if !strings.HasPrefix(
-		res.Recovery,
-		"cloudctx exec contoso -- az login --tenant 11111111-2222-3333-4444-555555555555",
-	) {
-		t.Errorf("recovery command = %q", res.Recovery)
-	}
-	if !strings.Contains(res.Recovery, "--claims-challenge") {
-		t.Errorf("recovery command has no claims challenge: %q", res.Recovery)
 	}
 
 	// Anything else is passed through verbatim.

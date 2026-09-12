@@ -557,3 +557,37 @@ func TestOpenSessionsWithRecordsCacheHitsWithoutTheToken(t *testing.T) {
 		t.Errorf("--refresh should report a miss:\n%s", report.String())
 	}
 }
+
+// TestClaimsChallengeDropsTheCachedToken: a Conditional Access challenge on
+// the write path is answered by deleting the context's cached token, not just
+// by printing the recovery command. Left in place, every warm run until the
+// token expired would reuse it and fail the same way.
+func TestClaimsChallengeDropsTheCachedToken(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	installFakeRunner(t, []string{"globex"})
+	tok := &azauth.Token{
+		Context:     "globex",
+		AccessToken: "cached",
+		ExpiresOn:   time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000"),
+		Tenant:      "tid-1",
+		TenantID:    "tid-1",
+		PrincipalID: "oid-1",
+	}
+	azauth.WriteTokenCache(tok, azauth.DefaultRunner)
+	if readTokenCache(t, "globex") == nil {
+		t.Fatal("the token cache was not written")
+	}
+
+	sess := &session{Context: "globex", Token: tok}
+	ae := armclient.ParseAPIError("PUT", "/x", 403, []byte(
+		`{"error":{"code":"RoleAssignmentRequestAcrsValidationFailed","message":"claims=`+
+			`{\"access_token\":{\"acrs\":{\"essential\":true,\"value\":\"c1\"}}}"}}`,
+	), nil)
+	res := applyRequestError(result{Role: "Contributor"}, sess, ae, nil)
+	if res.Outcome != OutcomeFailed || res.Recovery == "" {
+		t.Fatalf("claims challenge -> %s / recovery %q", res.Outcome, res.Recovery)
+	}
+	if readTokenCache(t, "globex") != nil {
+		t.Fatal("the cached token survived the claims challenge")
+	}
+}
