@@ -9,8 +9,51 @@ The exit-code contract will not change without a major version.
 
 ## [Unreleased]
 
-Correctness fixes from a full review, and a warm path that spawns nothing
-inside a context window.
+## [0.5.0] - 2026-09-16
+
+Project access files, activation at a narrower scope than your eligibility,
+and the correctness fixes from a full review of the tool.
+
+### Added
+
+- `pimctl init` creates a shareable `.pimctl.yaml` by choosing scopes and roles,
+  or importing a preset. It verifies the selection without activating roles.
+- `pimctl up` discovers the project file and checks its tenant, eligibility and
+  policies before requesting activation. Repeated runs preserve existing
+  activation windows. Use `--no-project` to return to ordinary selection.
+- `status --project` reports each requirement, including inactive or uncertain
+  roles. `down --project` deactivates the file's exact targets, leaving broader
+  activations alone. Bare `status` and `down` retain their existing behavior.
+- `up --key KEY --at SCOPE` activates an eligible role at a narrower scope after
+  Azure verifies eligibility there. Saved presets retain the narrower target;
+  failed verification never falls back to broader access.
+- `pimctl --version`, and one version line everywhere:
+  `pimctl v0.4.0 (<commit>, go1.x.y, os/arch)`.
+- Inside a `cloudctx use` window a warm command reads the context's Azure CLI
+  profile directly and spawns no cloudctx process; `--all-contexts` opens its
+  contexts concurrently; a named `down` sends its requests before the
+  activation listing has answered and widens to the listing afterwards.
+- The picker follows the terminal height on resize.
+- A policy lookup reads the rules from the policy-assignment listing's
+  `effectiveRules` and fetches the policy document only when they are absent,
+  which halves the cold cost of planning each role.
+- Releases carry build provenance attestations; the release build verifies the
+  module graph instead of tidying it; CI fails on an untidy `go.mod`.
+- An issue template, `.gitattributes`, `doccheck -h`, and `make clean` removes
+  every build output.
+
+### Changed
+
+- `make check` runs the race suite twice, so a test that leaks state into a
+  later run fails locally rather than only under `-count=2`.
+- The token cache is refused when its directory is group- or other-accessible,
+  matching the file check.
+
+### Removed
+
+- The deprecated, hidden `--hours` and `--duration` flags of `up`/`activate`.
+  Use `--for` (`--for 2h`, `--for 90m`, `--for PT2H30M`); passing either old
+  flag now fails with `unknown flag`.
 
 ### Fixed
 
@@ -52,55 +95,6 @@ inside a context window.
   timezone change between runs cannot shift it.
 - Boolean flags no longer render as if they took a value in `--help`.
 - `down PRESET --preset OTHER` is refused the way `up` refuses it.
-
-### Added
-
-- `pimctl --version`, and one version line everywhere:
-  `pimctl v0.4.0 (<commit>, go1.x.y, os/arch)`.
-- Inside a `cloudctx use` window a warm command reads the context's Azure CLI
-  profile directly and spawns no cloudctx process; `--all-contexts` opens its
-  contexts concurrently; a named `down` sends its requests before the
-  activation listing has answered and widens to the listing afterwards.
-- The picker follows the terminal height on resize.
-- A policy lookup reads the rules from the policy-assignment listing's
-  `effectiveRules` and fetches the policy document only when they are absent,
-  which halves the cold cost of planning each role.
-- Releases carry build provenance attestations; the release build verifies the
-  module graph instead of tidying it; CI fails on an untidy `go.mod`.
-- An issue template, `.gitattributes`, `doccheck -h`, and `make clean` removes
-  every build output.
-
-### Changed
-
-- `make check` runs the race suite twice, so a test that leaks state into a
-  later run fails locally rather than only under `-count=2`.
-- The token cache is refused when its directory is group- or other-accessible,
-  matching the file check.
-
-### Removed
-
-- The deprecated, hidden `--hours` and `--duration` flags of `up`/`activate`.
-  Use `--for` (`--for 2h`, `--for 90m`, `--for PT2H30M`); passing either old
-  flag now fails with `unknown flag`.
-
-## [0.4.0] - 2026-09-11
-
-Enable a project's required Azure roles with `pimctl up`, including access at
-a narrower scope than your eligibility.
-
-### Added
-
-- `pimctl init` creates a shareable `.pimctl.yaml` by choosing scopes and roles,
-  or importing a preset. It verifies the selection without activating roles.
-- `pimctl up` discovers the project file and checks its tenant, eligibility and
-  policies before requesting activation. Repeated runs preserve existing
-  activation windows. Use `--no-project` to return to ordinary selection.
-- `status --project` reports each requirement, including inactive or uncertain
-  roles. `down --project` deactivates the file's exact targets, leaving broader
-  activations alone. Bare `status` and `down` retain their existing behavior.
-- `up --key KEY --at SCOPE` activates an eligible role at a narrower scope after
-  Azure verifies eligibility there. Saved presets retain the narrower target;
-  failed verification never falls back to broader access.
 
 ## [0.3.0] - 2026-09-11
 
@@ -312,7 +306,7 @@ its last known state and is named.
 - macOS and Linux only. Paths, file modes and the pty tests assume a POSIX
   machine.
 
-[Unreleased]: https://github.com/larsakerlund/pimctl/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.4.0
+[Unreleased]: https://github.com/larsakerlund/pimctl/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.5.0
 [0.3.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.3.0
 [0.2.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.2.0
