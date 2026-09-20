@@ -1,30 +1,20 @@
 // The root command and what is global to all of it: the persistent flags every
-// subcommand inherits, how the build version is resolved, the `pimctl help
-// auth` topic, and the help-screen tidying. Each subcommand is built in the
-// file named after it.
+// subcommand inherits, the `pimctl help auth` topic, and the help-screen
+// tidying. Each subcommand is built in the file named after it, and the build
+// version — the stamped variable and the line `version` and --version print —
+// is version.go.
 
 package cli
 
 import (
 	"fmt"
-	"runtime/debug"
 	"slices"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/larsakerlund/pimctl/internal/cache"
 )
-
-// Version is the build version, stamped by the Makefile through
-// `-ldflags -X .../internal/cli.Version=...`. A plain `go build` leaves it at
-// [devVersion], which is what makes [versionString] fall back to the VCS
-// stamp the toolchain records on its own.
-var Version = devVersion
-
-// devVersion is the placeholder an unstamped build carries.
-const devVersion = "dev"
 
 // globalOpts is the set of persistent flags, in the order they are declared on
 // the root command. They decide which tenants a command acts on and how it
@@ -93,7 +83,12 @@ prints which tenant that resolved to. See "pimctl help auth".`,
   pimctl down                                # give it all back`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// Setting Version is what gives the root a --version flag. The template
+		// makes it print the same line `pimctl version` does, so a bug report
+		// can quote either.
+		Version: versionString(),
 	}
+	root.SetVersionTemplate("pimctl {{.Version}}\n")
 	registerGlobalFlags(root, opts)
 
 	presets, caches, version := newPresetCmd(opts), newCacheCmd(), newVersionCmd()
@@ -126,70 +121,6 @@ prints which tenant that resolved to. See "pimctl help auth".`,
 	return root
 }
 
-// newVersionCmd builds `pimctl version`, which prints what [versionString]
-// resolved. It touches no tenant, so [NewRootCmd] hides the global flags on it.
-func newVersionCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "version",
-		Short: "Print the pimctl version",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			fmt.Fprintf(cmd.OutOrStdout(), "pimctl %s\n", versionString())
-			return nil
-		},
-	}
-}
-
-// versionString reports the build version.
-//
-// The Makefile stamps internal/cli.Version. A plain `go build` or `go install`
-// stamps nothing, so rather than printing a bare "dev" it falls back to the
-// build info the Go toolchain records automatically — the module version, and
-// the VCS revision and dirty flag for a local build.
-func versionString() string {
-	if Version != "" && Version != devVersion {
-		return Version
-	}
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return devVersion
-	}
-	var revision, modified string
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			revision = setting.Value
-		case "vcs.modified":
-			modified = setting.Value
-		}
-	}
-	// Prefer the revision: for a local build the module version is a
-	// pseudo-version that already contains it, so printing both is noise.
-	if revision != "" {
-		const shortRevision = 8
-		if len(revision) > shortRevision {
-			revision = revision[:shortRevision]
-		}
-		if modified == "true" {
-			revision += "+dirty"
-		}
-		return revision
-	}
-	if v := info.Main.Version; v != "" && v != "(devel)" {
-		return v
-	}
-	return devVersion
-}
-
-// SetVersion lets main pass a version stamped into its own package, so
-// `-ldflags "-X main.version=..."` — the form most people reach for — works as
-// well as the Makefile's `-X internal/cli.Version=...`.
-func SetVersion(v string) {
-	if v = strings.TrimSpace(v); v != "" {
-		Version = v
-	}
-}
-
 // newAuthHelpTopic is a cobra help topic: `pimctl help auth`. Authentication is
 // the thing people need explained once and then never again, so it does not
 // belong in the root help every command prints.
@@ -220,17 +151,17 @@ keeps one Azure CLI store per context, so a token for one tenant can never be
 used against another. Without it, pimctl uses the one "az login" you have and
 says which tenant that is.
 
-Caching. The access token is cached per context under $XDG_CACHE_HOME/pimctl
-(0600 in a 0700 directory, refused if anything widens that) and reused while at
-least five minutes of validity remain — otherwise every command pays for an
-"az" process launch. The eligible-role listing is cached for ` + cache.TTLHuman + `,
-and each role's PIM policy for 24 hours. "--refresh" bypasses them, and
-"pimctl cache clear" deletes them.
+Caching. The access token is cached per context (0600 in a 0700 directory,
+refused if anything widens that) and reused while at least five minutes of
+validity remain — otherwise every command pays for an "az" process launch. The
+eligible-role listing is cached for ` + cache.TTLHuman + `, and each role's PIM
+policy for 24 hours, under $XDG_CACHE_HOME/pimctl. "--refresh" bypasses them,
+and "pimctl cache clear" deletes them.
 
 Activation state is never cached, but pimctl does keep a record of the
-activations it performed, under $XDG_STATE_HOME/pimctl. That is not a cache —
-it is what keeps "status" right while Azure's listing catches up — so
-"cache clear" leaves it alone. "cache clear --all" deletes it too.
+activations it performed. That is not a cache — it is what keeps "status" right
+while Azure's listing catches up — so "cache clear" leaves it alone.
+"cache clear --all" deletes it too.
 
 If ARM rejects a cached token, pimctl drops it and retries once with a fresh
 one, so a revoked or policy-invalidated token heals itself.
@@ -240,11 +171,15 @@ Conditional Access challenge is reported with the exact command to run. To end a
 session rather than start one: "az logout", or "cloudctx exec <ctx> -- az
 logout" for one context's store.
 
-The token cache is pimctl's own, not part of a cloudctx context: deleting a
-context does not remove it, and a context repointed at another tenant is caught
-on read — every cached token carries the tenant it was minted for, and one that
-no longer matches is dropped and re-minted. "pimctl cache clear" removes them
-all.`,
+Where they live. A context's token and activation record belong to that
+context, so they sit inside its own cloudctx store, $CLOUDCTX_STORE/pimctl/,
+and "cloudctx delete <name>" sweeps them with the rest of its credentials. The
+shared "az login" belongs to no context, so its token and record fall back to
+$XDG_CACHE_HOME/pimctl and $XDG_STATE_HOME/pimctl — as does everything on a
+machine without cloudctx. A context repointed at another tenant is caught on
+read: every cached token carries the tenant it was minted for, and one that no
+longer matches is dropped and re-minted. "pimctl cache clear" removes them
+all, wherever they live.`,
 		Args: cobra.NoArgs,
 		// A help topic has no RunE: cobra prints Long for `pimctl help auth`.
 	}
@@ -261,14 +196,16 @@ func registerGlobalFlags(root *cobra.Command, opts *globalOpts) {
 		nil,
 		"cloudctx context to act on (repeatable; defaults to $"+envContext+")",
 	)
-	pf.BoolVar(&opts.allContexts, "all-contexts", false, "act on every context reported by `cloudctx list`")
+	// No backticks in a usage string: pflag takes a backticked word as the
+	// flag's value name, and a bool flag has none.
+	pf.BoolVar(&opts.allContexts, "all-contexts", false, "act on every context reported by \"cloudctx list\"")
 	// A string flag with NoOptDefVal, so `--bare-az` still works as a bare
 	// switch while `--bare-az=force` can say something the switch cannot.
 	pf.StringVar(
 		(*string)(&opts.bareAz),
 		"bare-az",
 		string(bareAzUnset),
-		"use the shared `az login` store instead of a cloudctx context (=force to allow it inside a context window)",
+		"use the shared \"az login\" store instead of a cloudctx context (=force to allow it inside a context window)",
 	)
 	pf.Lookup("bare-az").NoOptDefVal = string(bareAzOn)
 	pf.StringVarP(&opts.output, "output", "o", "table", "output format: table or json")

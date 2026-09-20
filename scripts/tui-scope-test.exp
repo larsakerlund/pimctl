@@ -1,6 +1,12 @@
 #!/usr/bin/expect -f
 # Verify init's single-choice picker filters and accepts the highlighted scope
 # without a toggle, and erases itself on completion. No Azure calls occur.
+#
+# Usage:
+#   go build -tags tuiprobe -o bin/pimctl-tuiprobe ./cmd/tuiprobe
+#   expect scripts/tui-scope-test.exp bin/pimctl-tuiprobe
+#
+# `make tui-test` does both, for every script in this directory.
 set bin [lindex $argv 0]
 set timeout 20
 if {[info exists env(PIMCTL_TUI_TIMEOUT)]} {

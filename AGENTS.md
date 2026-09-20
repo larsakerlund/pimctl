@@ -50,7 +50,8 @@ the portal or by a colleague, so rows from it are marked `?` and every command
 that shows activation state still reconciles against Azure behind the scenes.
 If you touch it, keep that property — a fast answer that can be silently wrong
 is worse than a slow one. It is also not a cache: `pimctl cache clear` clears
-the three cache files above and leaves the record alone, because deleting it
+the four cache files above — the tokens, the listing, the policies and the
+probed cloudctx version — and leaves the record alone, because deleting it
 makes the next `status` under-report roles that are still held. `cache clear
 --all` deletes it and says what that costs.
 
@@ -73,7 +74,9 @@ Measured on a 25-scope tenant, so do not re-derive these by guessing:
 
 - The per-scope activation fan-out is the expensive call (~1.6 s p50 each,
   ~2.4 s wall at full concurrency). Never put it on the path to first output.
-- Token mint is ~1.2 s, eligibility ~0.7 s, a policy read ~1.2 s per role.
+- Token mint is ~1.2 s, eligibility ~0.7 s, a policy read ~1.2 s per role when
+  it needs both GETs; the assignment listing's `effectiveRules` normally make
+  it one.
   All three are cached; a warm command should do no network before printing.
 - HTTP/2 and connection reuse are already optimal, and process startup is
   0.02 s. There is nothing to win there — measure before optimising.
@@ -221,7 +224,7 @@ them.
 - **`linkedRoleEligibilityScheduleId` goes through verbatim**, exactly as the
   eligibility reported it. Rewriting it makes ARM reject the request.
 - **The tenant-wide active listing drops rows.** ARM's
-  `roleAssignmentScheduleInstances?$filter=asTarget()` is both slow (12-20s here)
+  `roleAssignmentScheduleInstances?$filter=asTarget()` is both slow (11-21 s here)
   and lossy — three runs against an unchanged tenant returned 126, 131 and 132
   instances with no nextLink. pimctl therefore fans out per scope by default.
   `--all-scopes` keeps the old single call for comparison. Do not make the
@@ -240,7 +243,9 @@ Every binary lives under `cmd/`, the layout a Go reader expects:
   behind that tag ships in `pimctl`.
 - `internal/cli` — cobra commands, the plan/execute pipeline, the activation
   record. One file per subject; every `*_test.go` names the file it covers,
-  except `fake_test.go` and `testhelpers_test.go`, which are the test rig.
+  except `fake_test.go` and `testhelpers_test.go`, which are the test rig, and
+  `nocloudctx_test.go`, the without-cloudctx suite, which cuts across the
+  package rather than covering one file.
 - `internal/armclient` — the ARM REST calls, retries and error classification.
 - `internal/azauth` — token acquisition through cloudctx.
 - `internal/cache` — the eligibility and policy caches. Not the activation

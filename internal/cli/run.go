@@ -8,6 +8,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -187,6 +188,45 @@ func reportUnconfirmedScopes(cmd *cobra.Command, rc *runContext, scopes []activa
 		len(scopes),
 		strings.Join(labelScopes(rc, scopes), ", "),
 	)
+}
+
+// reportUnreadScopes names on w the scopes an activation listing could not
+// read: the ones that answered with an error, each with its own, then the ones
+// that answered with nothing at all. what names the listing, since `up` and
+// `down` consult it for different reasons and the note says which. Nothing is
+// printed when there is nothing to report.
+//
+// A scope that carries its own error is named once, by that error: it is
+// unconfirmed as well — its state is unknown either way — but printing it a
+// second time as a missed deadline would inflate the count the user is asked
+// to trust and give the wrong reason for it.
+//
+// Callers pass stderr, so `-o json` stdout stays machine-readable, and call
+// after the results table: the table is ARM's per-request answer, and this is
+// only a caveat on how that answer was read.
+func reportUnreadScopes(w io.Writer, rc *runContext, what string, errs []error, unconfirmed []activationScope) {
+	late := make([]activationScope, 0, len(unconfirmed))
+	for _, scope := range unconfirmed {
+		if !scope.Errored {
+			late = append(late, scope)
+		}
+	}
+	if len(errs)+len(late) == 0 {
+		return
+	}
+	fmt.Fprintf(
+		w,
+		"note: %s could not read %d scope(s); "+
+			"each role's result above is ARM's own answer to its request:\n",
+		what,
+		len(errs)+len(late),
+	)
+	for _, err := range errs {
+		fmt.Fprintf(w, "  %v\n", err)
+	}
+	for _, label := range labelScopes(rc, late) {
+		fmt.Fprintf(w, "  %s: ARM did not answer within the deadline\n", label)
+	}
 }
 
 // labelScopes renders scope ids for a human, the way the tables do.

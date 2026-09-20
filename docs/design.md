@@ -1,8 +1,9 @@
 # pimctl — design notes
 
 Why pimctl is built the way it is: what was measured, what ARM actually does,
-and which decisions were reversed on evidence. The README is the manual; this is
-the lab notebook behind it.
+and which decisions were reversed on evidence. The guides in this directory,
+starting from [usage.md](usage.md), are the manual; this is the lab notebook
+behind them.
 
 ## The activation listing is a fan-out, not one call
 
@@ -102,7 +103,8 @@ activated in the portal or by a colleague. That is why it is always reconciled
 and why unconfirmed rows say so. Each entry keeps the request id it came from —
 which is what the propagation check above reads back — and records whether its
 start time came from ARM or from this machine's clock (`startSource`), so a
-reader can tell a fact from an approximation. `pimctl cache clear` removes all of it, and
+reader can tell a fact from an approximation. `pimctl cache clear` removes the
+caches above and leaves the record alone; `--all` removes the record too, and
 `--refresh` bypasses the caches for one run.
 
 
@@ -136,8 +138,15 @@ ownership are ignored; role caches are fetched again from ARM.
 every context's store.
 
 The file is `0600` inside a `0700` directory, written atomically, and **refused
-on read** if anything has widened those permissions: a token another account can
-read is worse than no cache at all. `az` itself already keeps access and refresh
+on read** if anything has widened those permissions — the file's, and
+separately the directory's: a directory that grants group or other any access
+is refused as `ErrCacheDirPermissions`, distinct from the file's own
+`ErrCachePermissions` so the message names the thing to chmod. A token another
+account can read is worse than no cache at all. The entry stores az's epoch
+`expires_on` alongside its local-time `expiresOn` string and prefers the epoch
+when deciding whether the token is still usable, because an epoch does not move
+when the machine's time zone does; the string is only the fallback for an `az`
+that reports no epoch. `az` itself already keeps access and refresh
 tokens unencrypted in `~/.azure/msal_token_cache.json` at `0600`, so this is a
 second copy of a credential the machine already holds rather than a new class of
 exposure. The token is never printed, never logged, never put in an error, and
@@ -147,8 +156,8 @@ If ARM rejects a cached token — revoked, or invalidated by a Conditional Acces
 change before its stated expiry — pimctl drops it and retries once with a fresh
 one. A second 401 is a real authorization failure and is reported.
 
-`pimctl cache clear` deletes the cached tokens, role listings and policies —
-everything pimctl can re-derive. It leaves the activation record alone, because
+`pimctl cache clear` deletes the cached tokens, role listings, policies and the
+probed cloudctx version — everything pimctl can re-derive. It leaves the activation record alone, because
 deleting that makes the next `status` under-report roles you are still holding
 until Azure's listing catches up; `pimctl cache clear --all` deletes it too and
 warns. Neither ends your `az` session: run `az logout`, or `cloudctx exec <ctx>
@@ -287,7 +296,11 @@ opaque *"Resource was disallowed by policy"* instead of the claims challenge.
 
 **`HTTP 429` / throttling.** ARM rate-limits role-management reads per account.
 pimctl retries throttled and transient (503/504) responses up to four times,
-honouring the `Retry-After` header, before giving up with an explanation.
+honouring the `Retry-After` header, before giving up with an explanation. The
+sleep before any one retry is capped at `MaxRetryDelay` (60 s): a `Retry-After`
+of hours would otherwise park the CLI for that long on every attempt, and a
+minute is longer than any throttling window seen on this tenant. The error a
+caller inspects still carries the value ARM sent; only the sleep is clamped.
 
 **`RoleAssignmentExists`.** The role is already active. pimctl reports
 `ALREADY ACTIVE` and does not treat it as a failure.

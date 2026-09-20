@@ -1,8 +1,9 @@
-// [target], one role to give up, and the three ways one can be named: from the
-// activation listing, from the eligibility listing, or from a preset. Where a
-// target came from is what decides how ARM's answer is read, which is why the
-// three constructors live together. Choosing which targets to act on is
-// deactivate.go; sending one to ARM is request.go.
+// [target], one role to give up, and the ways one can be named: from the
+// activation listing, from the record before the listing has landed, from the
+// eligibility listing, or from a preset. Where a target came from is what
+// decides how ARM's answer is read, which is why the constructors live
+// together. Choosing which targets to act on is deactivate.go; sending one to
+// ARM is request.go.
 
 package cli
 
@@ -51,6 +52,20 @@ func targetFromActive(r activeRow) target {
 		EndDateTime:      r.Assignment.Properties.EndDateTime,
 		SeenActive:       true,
 	}
+}
+
+// targetFromEvidence is a target for a role the evidence a named `down` holds
+// shows as held, before it has waited for the activation listing. It is
+// [targetFromActive] with one exception: a recorded activation ARM's listing
+// has not yet confirmed (RowConfirming) is this machine's own claim from
+// minutes ago, which a bare `down` checks against the activation's schedule
+// request before trusting. A named run has not made that check yet, so such a
+// target goes out without SeenActive and its answer is read against the
+// evidence only if ARM denies the assignment; see [activeEvidence.deactivate].
+func targetFromEvidence(r activeRow) target {
+	t := targetFromActive(r)
+	t.SeenActive = r.State != RowConfirming
+	return t
 }
 
 // targetFromEligible is a target for a role named through the eligibility

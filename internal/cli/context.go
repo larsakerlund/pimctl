@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/larsakerlund/pimctl/internal/azauth"
 	"github.com/larsakerlund/pimctl/internal/config"
@@ -140,7 +141,7 @@ func resolveContexts(
 	}
 
 	if len(flagContexts) > 0 {
-		return withSupportedCloudctx(resolution{Names: dedupeStrings(flagContexts), Source: SourceFlag})
+		return openable(flagContexts, SourceFlag)
 	}
 	if allContexts {
 		names, err := azauth.ListContexts(azauth.DefaultRunner)
@@ -150,7 +151,11 @@ func resolveContexts(
 		if len(names) == 0 {
 			return resolution{}, errNoContextsYet
 		}
-		return resolution{Names: names, Source: SourceAllContexts}, nil
+		// Through the same gate as every other source: the names come from
+		// cloudctx's registry rather than from the user, but they reach
+		// cloudctx's argv in the same positions, and [checkContextName] is
+		// what that argv is guarded by.
+		return openable(names, SourceAllContexts)
 	}
 	if bareAz.wanted() {
 		return resolution{Bare: true, Source: SourceAzLogin}, nil
@@ -162,12 +167,60 @@ func resolveContexts(
 		if len(presetContexts) == 1 && contextName(presetContexts[0]) == "" {
 			return resolution{Bare: true, Source: SourcePreset}, nil
 		}
-		return withSupportedCloudctx(resolution{Names: presetContexts, Source: SourcePreset})
+		return openable(presetContexts, SourcePreset)
 	}
 	if inContext != "" {
-		return withSupportedCloudctx(resolution{Names: []string{inContext}, Source: SourceEnv})
+		return openable([]string{inContext}, SourceEnv)
 	}
 	return resolution{Bare: true, Source: SourceAzLogin}, nil
+}
+
+// openable turns the names one source produced into a resolution, refusing any
+// name that cannot safely reach cloudctx's argv before anything is spawned:
+// see [checkContextName]. An empty member is refused from the flag, where it
+// is a typo, and passed through from a preset, where it is the shared az login
+// of a mixed preset — a choice rather than a name. Flag names are deduplicated,
+// since `-c a -c a` means one context. The cloudctx version gate is applied
+// last, through [withSupportedCloudctx].
+func openable(names []string, source contextSource) (resolution, error) {
+	for _, name := range names {
+		if name == "" && source == SourcePreset {
+			continue
+		}
+		if err := checkContextName(name, source); err != nil {
+			return resolution{}, err
+		}
+	}
+	if source == SourceFlag {
+		names = dedupeStrings(names)
+	}
+	return withSupportedCloudctx(resolution{Names: names, Source: source})
+}
+
+// checkContextName refuses a context name that cannot safely reach cloudctx's
+// argv. The name is handed to `cloudctx show <name>` and `cloudctx exec <name>
+// -- az …` as a positional argument, so one beginning with "-" is read by
+// cloudctx as an option: `-c --help` would run `cloudctx show --help`.
+// Whitespace and path separators are refused for the same reason a registry
+// would refuse them — no context is called that, and the name also becomes
+// part of a filename. The error names the source (flag, preset or environment)
+// so the reader knows what to fix.
+func checkContextName(name string, source contextSource) error {
+	var reason string
+	switch {
+	case strings.TrimSpace(name) == "":
+		reason = "is empty"
+	case strings.HasPrefix(name, "-"):
+		reason = "begins with \"-\", which cloudctx would read as an option"
+	case strings.ContainsFunc(name, unicode.IsSpace):
+		reason = "contains whitespace"
+	case strings.ContainsAny(name, `/\`):
+		reason = "contains a path separator"
+	default:
+		return nil
+	}
+	return fmt.Errorf("the context name %q (from %s) %s; `cloudctx list` shows the names cloudctx knows",
+		name, source, reason)
 }
 
 // withSupportedCloudctx passes a resolution through, unless the cloudctx

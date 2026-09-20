@@ -37,15 +37,23 @@ type projectStatusJSON struct {
 
 // runProjectStatus reads target scopes and every recorded scope, preserving
 // record correctness before rendering only project requirements. A fast answer
-// remains provisional and is always reconciled against Azure behind the scenes.
-func runProjectStatus(cmd *cobra.Command, rc *runContext, p *config.Project, fast, wait bool) error {
+// remains provisional and is always reconciled against Azure behind the scenes;
+// tty says whether stdout is a terminal, the one destination that can still be
+// shown the correction.
+func runProjectStatus(
+	cmd *cobra.Command,
+	rc *runContext,
+	tty ttyProbe,
+	p *config.Project,
+	fast, wait bool,
+) error {
 	s, err := projectSession(cmd, rc, p.Tenant)
 	if err != nil {
 		return err
 	}
 	scopes := projectScopes(p, s)
 	local := readLocalRecord(rc)
-	instant := fast || (term.StdoutIsTTY() && !rc.Opts.json() && !wait)
+	instant := fast || (tty.stdoutIsTTY() && !rc.Opts.json() && !wait)
 	if instant {
 		printProjectStatus(cmd, rc, p, s, local.rows, scopes)
 	}

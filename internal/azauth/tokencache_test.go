@@ -156,6 +156,95 @@ func TestTokenCacheRefusesWidePermissions(t *testing.T) {
 	}
 }
 
+// TestTokenCacheRefusesAWideDirectory: the file being 0600 is half of the
+// promise docs/design.md makes; the other half is the 0700 directory around it. A
+// directory group or other can enter names the context beside a credential and,
+// if writable, lets the file be replaced with one they can read — so it is
+// refused the way a wide file is, naming the directory to chmod.
+func TestTokenCacheRefusesAWideDirectory(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	WriteTokenCache(cacheToken(t, "contoso", time.Hour), noCloudctx)
+	path, err := TokenCachePath("contoso", noCloudctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+
+	for _, mode := range []os.FileMode{0o750, 0o710, 0o705, 0o755, 0o770} {
+		if err := os.Chmod(dir, mode); err != nil { // widening deliberately, to prove the refusal.
+			t.Fatal(err)
+		}
+		got, ok, err := ReadTokenCache("contoso", "", TokenCacheMargin, noCloudctx)
+		if got != nil || ok {
+			t.Errorf("dir mode %#o: a token inside a shared directory was served", mode)
+		}
+		if !errors.Is(err, ErrCacheDirPermissions) {
+			t.Errorf("dir mode %#o: got err %v, want ErrCacheDirPermissions", mode, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), dir) {
+			t.Errorf("dir mode %#o: the error does not name the directory to fix: %v", mode, err)
+		}
+	}
+	// 0700 is the directory mode the write side creates.
+	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: see above
+		t.Fatal(err)
+	}
+	if got := readCache(t, "contoso", ""); got == nil {
+		t.Error("a 0700 directory is what the write side creates, and must be accepted")
+	}
+	// A wide directory with no token in it has nothing to protect: still a
+	// plain miss, so a fresh install into an odd directory does not fail.
+	DropTokenCache("contoso", noCloudctx)
+	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // see above
+		t.Fatal(err)
+	}
+	if got, ok, err := ReadTokenCache("contoso", "", TokenCacheMargin, noCloudctx); got != nil || ok || err != nil {
+		t.Errorf("an empty wide directory should be a miss, got (%v, %v, %v)", got, ok, err)
+	}
+}
+
+// TestTokenCacheKeepsTheEpochExpiry: the entry carries az's Unix-seconds
+// expiry, so a TZ change between the write and the read does not shift the
+// moment the token is considered expired. An entry of the previous shape,
+// which holds only the local-time string, is retired rather than read by the
+// weaker field.
+func TestTokenCacheKeepsTheEpochExpiry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	tok := cacheToken(t, "contoso", time.Hour)
+	tok.ExpiresOn = "not a time" // the string alone would read as expired.
+	tok.ExpiresAt = time.Now().Add(time.Hour).Unix()
+	WriteTokenCache(tok, noCloudctx)
+	got := readCache(t, "contoso", "")
+	if got == nil {
+		t.Fatal("the epoch expiry should have made the entry usable")
+	}
+	if got.ExpiresAt != tok.ExpiresAt {
+		t.Errorf("ExpiresAt round-tripped as %d, want %d", got.ExpiresAt, tok.ExpiresAt)
+	}
+
+	// An epoch in the past is expired whatever the string says.
+	tok.ExpiresOn = time.Now().Add(time.Hour).Format("2006-01-02 15:04:05.000000")
+	tok.ExpiresAt = time.Now().Add(-time.Minute).Unix()
+	WriteTokenCache(tok, noCloudctx)
+	if got := readCache(t, "contoso", ""); got != nil {
+		t.Error("an entry whose epoch has passed must not be served")
+	}
+
+	// The previous on-disk shape.
+	path, err := TokenCachePath("contoso", noCloudctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := `{"version":1,"context":"contoso","accessToken":"` + tok.AccessToken + `",` +
+		`"expiresOn":"` + tok.ExpiresOn + `","tenant":"tid-1","principalId":"oid-1","tenantId":"tid-1"}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCache(t, "contoso", ""); got != nil {
+		t.Error("a version-1 entry must be retired, not served")
+	}
+}
+
 func TestTokenCacheCorruptAndMissingAreMisses(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	WriteTokenCache(cacheToken(t, "contoso", time.Hour), noCloudctx)

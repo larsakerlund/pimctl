@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeJWT builds an unsigned JWT with the given payload JSON. No real token is
@@ -387,6 +388,69 @@ func TestExecRunnerAppliesTheChildEnv(t *testing.T) {
 	}
 	if !strings.Contains(env, "PATH=") {
 		t.Errorf("the child lost its PATH:\n%s", env)
+	}
+}
+
+// TestAcquireReadsTheEpochExpiry: az emits the expiry twice — a local-time
+// string and `expires_on` in Unix seconds, the latter as a number or a string
+// depending on the az version. The epoch is preferred because it names the
+// same instant whatever TZ the reading process runs under; the string is the
+// fallback when az does not send one or sends one pimctl cannot read.
+func TestAcquireReadsTheEpochExpiry(t *testing.T) {
+	jwt := fakeJWT(`{"oid":"oid-1","tid":"tid-1"}`)
+	local := time.Date(2026, 9, 4, 12, 0, 0, 0, time.Local)
+	const epoch = 1_800_000_000
+	for _, tc := range []struct {
+		name, field string
+		wantAt      int64
+		wantExpiry  time.Time
+	}{
+		{"a number", `,"expires_on":1800000000`, epoch, time.Unix(epoch, 0)},
+		{"a string", `,"expires_on":"1800000000"`, epoch, time.Unix(epoch, 0)},
+		{"a fractional string", `,"expires_on":"1800000000.5"`, epoch, time.Unix(epoch, 0)},
+		{"absent", ``, 0, local},
+		{"null", `,"expires_on":null`, 0, local},
+		{"unreadable", `,"expires_on":"soon"`, 0, local},
+		{"negative", `,"expires_on":-5`, 0, local},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := func(string, ...string) ([]byte, []byte, error) {
+				return []byte(`{"accessToken":"` + jwt + `","expiresOn":"2026-09-04 12:00:00.000000"` +
+					tc.field + `,"tenant":"tid-1"}`), nil, nil
+			}
+			tok, err := Acquire("contoso", run)
+			if err != nil {
+				t.Fatalf("Acquire: %v", err)
+			}
+			if tok.ExpiresAt != tc.wantAt {
+				t.Errorf("ExpiresAt = %d, want %d", tok.ExpiresAt, tc.wantAt)
+			}
+			if got := tok.Expiry(); !got.Equal(tc.wantExpiry) {
+				t.Errorf("Expiry() = %v, want %v", got, tc.wantExpiry)
+			}
+			if tok.ExpiresOn != "2026-09-04 12:00:00.000000" {
+				t.Errorf("the local-time string was not kept verbatim: %q", tok.ExpiresOn)
+			}
+		})
+	}
+}
+
+// TestExpiryPrefersTheEpochOverTheLocalString: with both present the epoch
+// wins even when the string disagrees, because the string is the one that
+// moves with the machine's time zone.
+func TestExpiryPrefersTheEpochOverTheLocalString(t *testing.T) {
+	const epoch = 1_800_000_000
+	tok := Token{ExpiresOn: "2000-01-01 00:00:00", ExpiresAt: epoch}
+	if got := tok.Expiry(); !got.Equal(time.Unix(epoch, 0)) {
+		t.Errorf("Expiry() = %v, want the epoch %v", got, time.Unix(epoch, 0))
+	}
+	if !tok.UsableFor(time.Minute) {
+		t.Error("an epoch far in the future makes the token usable regardless of the string")
+	}
+	// Without an epoch the string is what there is.
+	tok.ExpiresAt = 0
+	if tok.UsableFor(time.Minute) {
+		t.Error("with no epoch, a string in the past must make the token unusable")
 	}
 }
 

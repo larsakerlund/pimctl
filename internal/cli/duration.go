@@ -1,6 +1,6 @@
-// Turning the activation length the user typed into a duration: --for and the
-// two deprecated spellings it supersedes. Capping that duration to each role's
-// own policy maximum happens later, in [BuildPlan].
+// Turning the activation length the user typed with --for into a duration.
+// Capping that duration to each role's own policy maximum happens later, in
+// [buildPlan].
 
 package cli
 
@@ -28,7 +28,18 @@ func parseFriendlyDuration(s string) (time.Duration, error) {
 	}
 	upper := strings.ToUpper(trimmed)
 	if strings.HasPrefix(upper, "P") {
-		return armclient.ParseISODuration(upper)
+		d, err := armclient.ParseISODuration(upper)
+		if err != nil {
+			return 0, err
+		}
+		// A day count past about 106,751 overflows time.Duration and comes
+		// back negative; that is not a duration anyone meant, and letting it
+		// through would have the caller report it as "must be greater than
+		// zero", which sends the reader at the wrong problem.
+		if d < 0 {
+			return 0, fmt.Errorf("%q is not a duration I understand (try 2h, 90m, 1h30m or PT2H30M)", s)
+		}
+		return d, nil
 	}
 	lower := strings.ToLower(trimmed)
 	if !goDurationRE.MatchString(lower) {
@@ -41,48 +52,21 @@ func parseFriendlyDuration(s string) (time.Duration, error) {
 	return d, nil
 }
 
-// requestedDuration turns --for (or the deprecated --hours/--duration) into a
-// duration. Zero means "use each role's policy maximum" — which is why an
-// explicitly given zero or negative value has to be rejected rather than
-// quietly meaning the longest window the policy allows.
-func requestedDuration(cmd *cobra.Command, forVal string, hours float64, iso string) (time.Duration, error) {
-	changed := func(name string) bool { return cmd != nil && cmd.Flags().Changed(name) }
-	given := 0
-	for _, n := range []string{"for", "hours", "duration"} {
-		if changed(n) {
-			given++
-		}
+// requestedDuration turns --for into a duration. Zero means "use each role's
+// policy maximum" — which is why an explicitly given zero or negative value
+// has to be rejected rather than quietly meaning the longest window the
+// policy allows. The flag is read through cmd's Changed() so that an
+// unset flag and an explicitly empty one are told apart.
+func requestedDuration(cmd *cobra.Command, forVal string) (time.Duration, error) {
+	if cmd == nil || !cmd.Flags().Changed("for") {
+		return 0, nil
 	}
-	if given > 1 {
-		return 0, errors.New("give only one of --for, --hours or --duration (--for supersedes the other two)")
+	d, err := parseFriendlyDuration(forVal)
+	if err != nil {
+		return 0, fmt.Errorf("--for: %w", err)
 	}
-
-	switch {
-	case changed("for"):
-		d, err := parseFriendlyDuration(forVal)
-		if err != nil {
-			return 0, fmt.Errorf("--for: %w", err)
-		}
-		if d <= 0 {
-			return 0, errors.New("--for must be greater than zero (omit it to use each role's policy maximum)")
-		}
-		return d, nil
-	case changed("hours"):
-		if hours <= 0 {
-			return 0, errors.New("--hours must be greater than zero (omit the flag to use each role's policy maximum)")
-		}
-		return time.Duration(hours * float64(time.Hour)), nil
-	case changed("duration"):
-		d, err := armclient.ParseISODuration(iso)
-		if err != nil {
-			return 0, fmt.Errorf("--duration: %w", err)
-		}
-		if d <= 0 {
-			return 0, errors.New(
-				"--duration must be greater than zero (omit the flag to use each role's policy maximum)",
-			)
-		}
-		return d, nil
+	if d <= 0 {
+		return 0, errors.New("--for must be greater than zero (omit it to use each role's policy maximum)")
 	}
-	return 0, nil
+	return d, nil
 }

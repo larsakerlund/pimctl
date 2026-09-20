@@ -40,6 +40,19 @@ pass() {
 work=$(mktemp -d "${TMPDIR:-/tmp}/pimctl-install-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
+# check_reported_version compares what an installed binary printed for
+# `pimctl version` against the release tag. The line is
+# `pimctl v0.4.0 (6051853, go1.26.7, linux/amd64)`, and releases up to 0.3.0
+# print `pimctl 0.3.0`; the second word, stripped of its v, is the tag in both,
+# so the script keeps working against whichever release is the latest.
+check_reported_version() {
+  got="$1"
+  [ "${got%% *}" = "pimctl" ] || fail "installed binary reports '$got', expected it to start with 'pimctl'"
+  reported=$(printf '%s\n' "$got" | awk 'NR == 1 { print $2 }')
+  [ "${reported#v}" = "${expected_tag#v}" ] ||
+    fail "installed binary reports '$got', expected version ${expected_tag#v}"
+}
+
 # resolve_expected_tag works out which release install.sh ought to pick, so the
 # version checks below compare two answers rather than trusting one.
 #
@@ -90,8 +103,7 @@ installs_a_working_binary() {
   pass "the binary was installed into PIMCTL_INSTALL_DIR, executable"
 
   got=$("$bindir/pimctl" version) || fail "the installed binary does not run"
-  [ "$got" = "pimctl ${expected_tag#v}" ] ||
-    fail "installed binary reports '$got', expected 'pimctl ${expected_tag#v}'"
+  check_reported_version "$got"
   pass "it runs and reports $expected_tag"
 }
 
@@ -153,8 +165,7 @@ installs_without_a_token() {
   cat "$work/public.out"
 
   got=$("$puredir/pimctl" version) || fail "the installed binary does not run"
-  [ "$got" = "pimctl ${expected_tag#v}" ] ||
-    fail "installed binary reports '$got', expected 'pimctl ${expected_tag#v}'"
+  check_reported_version "$got"
   pass "an unauthenticated install works and reports $expected_tag"
 
   # The point of the check above is not only that it worked here, but that it

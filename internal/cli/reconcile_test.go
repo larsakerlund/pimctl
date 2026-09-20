@@ -8,7 +8,12 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -493,5 +498,193 @@ func TestDebugNamesTheConfirmationStep(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "confirm 1 activation(s) against their requests") {
 		t.Errorf("the confirmation step is unnamed in the breakdown:\n%s", errOut)
+	}
+}
+
+// TestOpenRequestIsNotRecordedAsHeld: ARM refusing a request because an
+// earlier one is still open says nothing about what is held — the obvious case
+// is that earlier request still waiting on an approver. The run must fail
+// rather than read as already-active, and the record must stay empty: an entry
+// written here would make `status` show the role as held for the whole
+// confirmation window.
+func TestOpenRequestIsNotRecordedAsHeld(t *testing.T) {
+	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()}
+	f.install()
+	f.setPutErr(func(string) (int, string) {
+		return http.StatusBadRequest,
+			`{"error":{"code":"RoleAssignmentScheduleRequestExists","message":"A role assignment schedule request already exists."}}`
+	})
+
+	out, _, err := runCmd(t, "up", "-c", "contoso", "--all", "-j", "x", "-y")
+	if err == nil || ExitCode(err) != ExitFailed {
+		t.Fatalf("an open request must exit %d, got err=%v", ExitFailed, err)
+	}
+	if strings.Contains(out, "ALREADY ACTIVE") {
+		t.Errorf("an open request was reported as already active:\n%s", out)
+	}
+	for _, want := range []string{"FAILED", "request exists", "pimctl status"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+	if got := readRecord(testOwner("contoso")); len(got) != 0 {
+		t.Fatalf("the record holds %d entries after a refused request, want none: %+v", len(got), got)
+	}
+	rows := localActiveRows(&runContext{Sessions: []*session{{
+		Context: "contoso", Token: &azauth.Token{Context: "contoso", TenantID: "tid-1", PrincipalID: "oid-1"},
+	}}})
+	if len(rows) != 0 {
+		t.Fatalf("status would show %d roles from the record, want none", len(rows))
+	}
+}
+
+// TestConcurrentRecordWritersLoseNothing: an `up` landing activations while a
+// `down` writes tombstones for other roles are two processes each reading the
+// record, merging their own entries and publishing. Both writes go through the
+// record's lock, so neither publishes over the other's entries; without it the
+// last writer would win and whatever the other wrote would be gone. flock(2) is
+// held per open file description, so two goroutines each taking the sidecar
+// stand in for two processes.
+func TestConcurrentRecordWritersLoseNothing(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	owner := testOwner("contoso")
+	const perWriter = 25
+	end := time.Now().Add(time.Hour)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range perWriter {
+			recordActivations([]result{{
+				Owner: owner, Context: "contoso", Role: "Cost Management Contributor",
+				Scope:            fmt.Sprintf("/providers/Microsoft.Management/managementGroups/up-%d", i),
+				RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + costGUID,
+				Outcome:          OutcomeActivated, Until: &end,
+			}})
+		}
+	})
+	wg.Go(func() {
+		for i := range perWriter {
+			forgetActivations([]result{{
+				Owner: owner, Context: "contoso", Role: "Resource Policy Contributor",
+				Scope:            fmt.Sprintf("/providers/Microsoft.Management/managementGroups/down-%d", i),
+				RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + contribGUID,
+				Outcome:          OutcomeDeactivated,
+			}})
+		}
+	})
+	wg.Wait()
+
+	var held, revoked int
+	for _, e := range readRecord(owner) {
+		if e.Revoked() {
+			revoked++
+		} else {
+			held++
+		}
+	}
+	if held != perWriter || revoked != perWriter {
+		t.Fatalf("the record holds %d activations and %d tombstones after %d of each were written concurrently; "+
+			"one writer overwrote the other", held, revoked, perWriter)
+	}
+}
+
+// TestEveryRecordWriterWaitsForTheLock: the three things that rewrite the
+// record — an activation landing, a deactivation's tombstone, and the
+// reconciliation after a listing — each read the file, derive the new contents
+// from what they read and publish. Every one of them has to do that under the
+// record's lock, or another process's write between its read and its publish
+// is lost. The proof is direct: with the sidecar held, none of them completes
+// until it is let go, and what it then leaves on disk is checked, so "the
+// write completed" means the write landed. flock(2) is held per open file
+// description, so the test's own lock stands in for another process.
+func TestEveryRecordWriterWaitsForTheLock(t *testing.T) {
+	owner := testOwner("contoso")
+	end := time.Now().Add(time.Hour)
+	activation := result{
+		Owner: owner, Context: "contoso", Role: "Cost Management Contributor",
+		Scope:            "/providers/Microsoft.Management/managementGroups/contoso-prod",
+		RoleDefinitionID: "/providers/Microsoft.Authorization/roleDefinitions/" + costGUID,
+		Outcome:          OutcomeActivated, Until: &end,
+	}
+	for _, tc := range []struct {
+		name  string
+		write func()
+		// landed is what the record must hold once the writer is let through,
+		// so a write that took the lock and then wrote nothing — or wrote
+		// somewhere else — cannot pass as "it completed".
+		landed func(t *testing.T, path string)
+	}{
+		{
+			name:  "activation",
+			write: func() { recordActivations([]result{activation}) },
+			landed: func(t *testing.T, _ string) {
+				t.Helper()
+				if got := readRecord(owner); len(got) != 1 || got[0].Revoked() {
+					t.Errorf("the unblocked write left %+v, want the activation", got)
+				}
+			},
+		},
+		{
+			name: "tombstone",
+			write: func() {
+				gone := activation
+				gone.Outcome = OutcomeDeactivated
+				forgetActivations([]result{gone})
+			},
+			landed: func(t *testing.T, _ string) {
+				t.Helper()
+				if got := readRecord(owner); len(got) != 1 || !got[0].Revoked() {
+					t.Errorf("the unblocked write left %+v, want the tombstone", got)
+				}
+			},
+		},
+		{
+			name:  "reconciliation",
+			write: func() { reconcileRecord(owner, nil, nil, nil) },
+			landed: func(t *testing.T, path string) {
+				t.Helper()
+				// Nothing active and nothing recorded: the record it publishes
+				// is empty, so the file itself is the evidence it wrote one.
+				if _, err := os.Stat(path); err != nil {
+					t.Errorf("the unblocked reconciliation wrote no record: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			path, err := recordPath(owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			unlock := lockRecord(path)
+
+			// started is closed from inside the goroutine, so the window
+			// below measures the writer being blocked rather than the runtime
+			// not having scheduled it yet.
+			started := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				close(started)
+				tc.write()
+				close(done)
+			}()
+			<-started
+			select {
+			case <-done:
+				t.Fatal("the write went ahead while another process held the record's lock")
+			case <-time.After(100 * time.Millisecond):
+			}
+			unlock()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the write never completed after the lock was released")
+			}
+			tc.landed(t, path)
+		})
 	}
 }

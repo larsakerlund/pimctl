@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/larsakerlund/pimctl/internal/config"
-	"github.com/larsakerlund/pimctl/internal/term"
 )
 
 // errNoConfirmTTY is returned when the confirmation prompt cannot be shown and
@@ -97,12 +96,15 @@ func (o confirmOpts) NeedsConfirmation() bool {
 	return o.All || o.Roles > confirmBulkThreshold
 }
 
-// confirmPlan prints the plan and, when NeedsConfirmation says so, asks before
-// going ahead. A run that does not need confirming still prints the plan, but
-// only to a table run — under -o json it would corrupt the output.
-func confirmPlan(
+// confirmPlanWith prints the plan and, when NeedsConfirmation says so, asks
+// before going ahead. A run that does not need confirming still prints the
+// plan, but only to a table run — under -o json it would corrupt the output.
+// tty decides whether the question can be put at all: without a terminal on
+// stdin it returns [errNoConfirmTTY] rather than guessing an answer.
+func confirmPlanWith(
 	cmd *cobra.Command,
 	g *globalOpts,
+	tty ttyProbe,
 	opts confirmOpts,
 	printPlan func(io.Writer),
 ) (bool, error) {
@@ -112,7 +114,7 @@ func confirmPlan(
 		}
 		return true, nil
 	}
-	if !term.StdinIsTTY() {
+	if !tty.stdinIsTTY() {
 		return false, errNoConfirmTTY
 	}
 	printPlan(planWriter(cmd, g))

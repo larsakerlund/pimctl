@@ -20,8 +20,9 @@ import (
 )
 
 // initRows collects one or more scopes, then verifies selections can be replayed
-// without embedding a user's source schedule in the generated file.
-func initRows(cmd *cobra.Command, rc *runContext, s *session, o initOpts) ([]row, error) {
+// without embedding a user's source schedule in the generated file. tty is the
+// terminal probe the role picker reports its summary line through.
+func initRows(cmd *cobra.Command, rc *runContext, tty ttyProbe, s *session, o initOpts) ([]row, error) {
 	var out []row
 	targets := o.at
 	for {
@@ -33,7 +34,7 @@ func initRows(cmd *cobra.Command, rc *runContext, s *session, o initOpts) ([]row
 			targets = []string{scope}
 		}
 		for _, scope := range targets {
-			rows, err := initScopeRows(cmd, rc, s, scope, o.roles)
+			rows, err := initScopeRows(cmd, rc, tty, s, scope, o.roles)
 			if err != nil {
 				return nil, err
 			}
@@ -54,8 +55,16 @@ func initRows(cmd *cobra.Command, rc *runContext, s *session, o initOpts) ([]row
 }
 
 // initScopeRows offers eligible roles at or above scope, then resolves each
-// selected role by portable identity. Ambiguity prevents creating a broken file.
-func initScopeRows(cmd *cobra.Command, rc *runContext, s *session, scope string, filters []string) ([]row, error) {
+// selected role by portable identity. Ambiguity prevents creating a broken
+// file. tty is the terminal probe the picker reports its selection through.
+func initScopeRows(
+	cmd *cobra.Command,
+	rc *runContext,
+	tty ttyProbe,
+	s *session,
+	scope string,
+	filters []string,
+) ([]row, error) {
 	sp := term.NewSpinner(cmd.ErrOrStderr(), "reading eligible project roles…")
 	roles, err := scopedEligibilities(rc.Ctx, s, scope, rc.Refresh)
 	sp.Stop()
@@ -78,7 +87,7 @@ func initScopeRows(cmd *cobra.Command, rc *runContext, s *session, scope string,
 			return nil, err
 		}
 	} else {
-		rows, err = selectInteractive(rows, false, scopeLabelerForRows(rows))
+		rows, err = selectInteractive(rows, false, scopeLabelerForRows(rows), tty)
 		if err != nil {
 			return nil, err
 		}

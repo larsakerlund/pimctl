@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
 	"github.com/larsakerlund/pimctl/internal/azauth"
@@ -54,22 +55,6 @@ func labelOf(name string) string {
 // for one command tree instead of for the process.
 type sessionOpener func(res resolution, t *timings, refresh bool) ([]*session, []error, error)
 
-// deps are the collaborators a command tree uses, injected at construction.
-//
-// There is one of them today. It is a struct rather than a bare function
-// parameter because the next seam should join it here instead of becoming a
-// second package variable, which is what these were before.
-type deps struct {
-	openSessions sessionOpener // defaults to [openSessionsWith]; replaced in tests.
-	timeouts     timeouts      // the run's time budgets; shortened in tests.
-}
-
-// defaultDeps is what [NewRootCmd] uses: the real ARM-backed opener and the
-// production time budgets.
-func defaultDeps() deps {
-	return deps{openSessions: openSessionsWith, timeouts: defaultTimeouts()}
-}
-
 // openSessionsWith mints one ARM token per context.
 //
 // A context that cannot produce a token does not abort the others: its error is
@@ -79,43 +64,54 @@ func defaultDeps() deps {
 // never be mistaken for a complete one. Only a total failure — no session at
 // all — is fatal.
 //
+// Several contexts open concurrently: each one pays ~0.65 s for the `cloudctx
+// show` spawn and, with no cached token, ~1.2 s for the mint, and one after
+// another that is N times the wait for `--all-contexts`. Opening them at once is safe
+// because a context that is not logged in fails fast — `az account
+// get-access-token` reports it rather than starting a device-code flow — so
+// no two of them can compete for the terminal. The sessions, the failures and
+// the --debug lines still come out in the order the contexts were named, not
+// the order the mints finished, and a single context is opened on the calling
+// goroutine.
+//
 // refresh is passed in rather than read from the flags so a caller can force a
-// fresh mint. It
-// records a token span per context in t, and notes whether the token came from
-// the cache — never the token itself.
+// fresh mint. It records a token span per context in t, and notes whether the
+// token came from the cache — never the token itself.
 func openSessionsWith(res resolution, t *timings, refresh bool) ([]*session, []error, error) {
 	names := res.Names
 	if res.Bare {
 		names = []string{""}
 	}
+	slots := make([]openedSession, len(names))
+	if len(names) == 1 {
+		slots[0] = openSession(names[0], refresh)
+	} else {
+		var wg sync.WaitGroup
+		for i, name := range names {
+			wg.Go(func() { slots[i] = openSession(name, refresh) })
+		}
+		wg.Wait()
+	}
 	var (
 		sessions = make([]*session, 0, len(names))
 		failures []error
 	)
-	for _, name := range names {
-		var tok *azauth.Token
-		err := t.Track("token ("+labelOf(name)+")", func() error {
-			var e error
-			tok, e = azauth.AcquireCached(name, azauth.DefaultRunner, refresh)
-			return e
-		})
-		if err != nil {
-			failures = append(failures, err)
+	for i, name := range names {
+		slot := slots[i]
+		if t != nil && t.enable {
+			t.record("token ("+labelOf(name)+")", slot.took)
+		}
+		if slot.err != nil {
+			failures = append(failures, slot.err)
 			continue
 		}
-		if t != nil {
-			// Only whether it was a hit — never the token.
-			state := "miss (minted via cloudctx/az)"
-			if tok.FromCache {
-				state = "cache hit"
-			}
-			t.note("token " + labelOf(name) + ": " + state)
+		// Only whether it was a hit — never the token.
+		state := "miss (minted via cloudctx/az)"
+		if slot.session.Token.FromCache {
+			state = "cache hit"
 		}
-		sessions = append(sessions, &session{
-			Context: name,
-			Token:   tok,
-			Client:  armclient.New(armclient.DefaultHost, tok.AccessToken, nil),
-		})
+		t.note("token " + labelOf(name) + ": " + state)
+		sessions = append(sessions, slot.session)
 	}
 	if len(sessions) == 0 {
 		if len(failures) == 0 {
@@ -127,6 +123,37 @@ func openSessionsWith(res resolution, t *timings, refresh bool) ([]*session, []e
 		return nil, failures, fmt.Errorf("no context could be used:\n%w", errors.Join(failures...))
 	}
 	return sessions, failures, nil
+}
+
+// openedSession is what opening one context produced, parked in that context's
+// slot until every context has answered so the results can be read out in the
+// order the contexts were named rather than the order the mints finished.
+type openedSession struct {
+	session *session      // the open session; nil when the mint failed.
+	err     error         // why the mint failed; nil when it did not.
+	took    time.Duration // how long the mint took, for the --debug breakdown.
+}
+
+// openSession mints one context's token and binds an ARM client to it. It
+// spawns cloudctx/az through [azauth.AcquireCached] unless a usable cached
+// token exists, and measures the wait either way so the caller can attribute
+// it in the --debug breakdown once every context has answered. The error is
+// [azauth.AcquireCached]'s, which names the context and carries az's stderr.
+func openSession(name string, refresh bool) openedSession {
+	start := time.Now()
+	tok, err := azauth.AcquireCached(name, azauth.DefaultRunner, refresh)
+	took := time.Since(start)
+	if err != nil {
+		return openedSession{err: err, took: took}
+	}
+	return openedSession{
+		session: &session{
+			Context: name,
+			Token:   tok,
+			Client:  armclient.New(armclient.DefaultHost, tok.AccessToken, nil),
+		},
+		took: took,
+	}
 }
 
 // reportContextFailures prints per-context problems as warnings. They go to

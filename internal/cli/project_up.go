@@ -38,7 +38,13 @@ func resolveActivationProject(cmd *cobra.Command, o *activateOpts) error {
 
 // runProjectActivation checks tenant ownership, resolves all targets and starts
 // per-target reconciliation after printing the chosen project and account.
-func runProjectActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, requested time.Duration) error {
+func runProjectActivation(
+	cmd *cobra.Command,
+	rc *runContext,
+	tty ttyProbe,
+	o *activateOpts,
+	requested time.Duration,
+) error {
 	s, err := projectSession(cmd, rc, o.requirements.Tenant)
 	if err != nil {
 		return err
@@ -71,7 +77,7 @@ func runProjectActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, r
 	if rc.Ctx.Err() != nil {
 		return rc.Ctx.Err()
 	}
-	return finishActivation(cmd, rc, o, requested, rows, rows, false, future, nil)
+	return finishActivation(cmd, rc, tty, o, requested, rows, rows, false, future, nil)
 }
 
 // buildProjectPlan preserves verified active windows and resolves policies only

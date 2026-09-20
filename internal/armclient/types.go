@@ -257,10 +257,12 @@ const (
 // these, which is why the predicates below consult maps rather than comparing
 // against this list.
 const (
-	StatusProvisioned = "Provisioned" // the activation is in effect.
-	StatusGranted     = "Granted"     // ARM's other spelling of the same outcome.
-	StatusRevoked     = "Revoked"     // the good end of a deactivation, and a failed activation.
-	StatusCanceled    = "Canceled"    // the request was withdrawn before it took effect.
+	StatusProvisioned        = "Provisioned"        // the activation is in effect.
+	StatusGranted            = "Granted"            // ARM's other spelling of the same outcome.
+	StatusRevoked            = "Revoked"            // the good end of a deactivation, and a failed activation.
+	StatusCanceled           = "Canceled"           // the request was withdrawn before it took effect.
+	StatusExpired            = "Expired"            // the request lapsed before it was granted.
+	StatusRevokedAndCanceled = "RevokedAndCanceled" // the request was withdrawn and its assignment revoked.
 )
 
 // successStatuses are the good terminal states for an activation.
@@ -283,15 +285,31 @@ var pendingApprovalStatuses = map[string]bool{
 }
 
 // failureStatuses are the bad terminal states. Revoked is deliberately absent:
-// it is the successful end state of a deactivation, not a failure.
+// it is the successful end state of a deactivation, not a failure, and
+// [IsFailureStatusFor] is where it counts against an activation. Expired and
+// RevokedAndCanceled are here because polling has to stop on them: a request
+// ARM has already closed will never change again, and waiting out the full
+// poll budget on it only delays a settled answer.
 var failureStatuses = map[string]bool{
 	"Failed":                   true,
 	"Denied":                   true,
 	"AdminDenied":              true,
 	"TimedOut":                 true,
 	StatusCanceled:             true,
+	StatusExpired:              true,
+	StatusRevokedAndCanceled:   true,
 	"Invalid":                  true,
 	"FailedAsResourceIsLocked": true,
+}
+
+// revocationStatuses are the terminal statuses that mean ARM took the access
+// away or let the request lapse, rather than refusing it or never finishing.
+// They are named separately because "still Revoked after 2m" is the wrong
+// reading of one: nothing is pending, the request is over.
+var revocationStatuses = map[string]bool{
+	StatusRevoked:            true,
+	StatusRevokedAndCanceled: true,
+	StatusExpired:            true,
 }
 
 // IsSuccessStatus reports whether the request reached a good terminal state.
@@ -312,6 +330,21 @@ func IsPendingApprovalStatus(s string) bool { return pendingApprovalStatuses[s] 
 
 // IsFailureStatus reports whether the request reached a bad terminal state.
 func IsFailureStatus(s string) bool { return failureStatuses[s] }
+
+// IsFailureStatusFor is the request-type-aware form: Revoked is the successful
+// end of a deactivation but a failed activation, so for a SelfActivate it counts
+// as a failure here even though [IsFailureStatus] never says so.
+func IsFailureStatusFor(requestType, status string) bool {
+	if status == StatusRevoked {
+		return requestType != RequestTypeSelfDeactivate
+	}
+	return failureStatuses[status]
+}
+
+// IsRevocationStatus reports whether the request ended with the access revoked
+// or the request lapsed, as opposed to being refused or never finishing. The
+// CLI uses it to word the outcome: a revoked request is over, not stalled.
+func IsRevocationStatus(s string) bool { return revocationStatuses[s] }
 
 // IsTerminalStatus reports whether polling can stop.
 func IsTerminalStatus(s string) bool {

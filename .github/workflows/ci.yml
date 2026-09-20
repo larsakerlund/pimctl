@@ -18,6 +18,12 @@ env:
 # comment. A tag can be moved; a SHA cannot, and a supply-chain attack on a
 # popular action is a tag being repointed rather than a new release nobody
 # installs. Bump the comment and the SHA together.
+#
+# Every checkout sets persist-credentials: false. By default actions/checkout
+# writes the job's token into .git/config, where any later step — a linter, a
+# test, a tool fetched by `go run` — can read it. Nothing in these jobs pushes,
+# so nothing needs it; the release workflow passes GITHUB_TOKEN to goreleaser
+# through the environment instead.
 
 jobs:
   lint:
@@ -25,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -36,6 +44,12 @@ jobs:
           args: --timeout=5m
       - name: formatters
         run: golangci-lint fmt --diff ./...
+      # go.mod and go.sum are part of the reviewed source. A module that is not
+      # tidy means a build on another machine resolves something the commit did
+      # not pin; -diff reports the change instead of writing it, so an untidy
+      # commit fails here rather than being quietly rewritten at release time.
+      - name: go mod tidy
+        run: go mod tidy -diff
       - name: go vet
         run: go vet ./...
       # The documentation gate. Same command `make doccheck` runs locally; it
@@ -57,12 +71,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
-      # Same command `make vuln` runs locally. Kept as its own job so a new
-      # advisory is reported as a security failure rather than buried in lint.
+      # Same command `make vuln` runs locally, with govulncheck pinned in the
+      # Makefile. Kept as its own job so a new advisory is reported as a security
+      # failure rather than buried in lint. There is no vulnerability-database
+      # cache to restore: govulncheck keeps none on disk and reads vuln.go.dev
+      # on every run, so the module cache setup-go restores above is all the
+      # caching there is.
       - run: make vuln
 
   # macOS is where pimctl is actually used, and it is not the same platform:
@@ -77,6 +97,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -93,6 +115,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -127,6 +151,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: make test-install
         run: make test-install
         env:

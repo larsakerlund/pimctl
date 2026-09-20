@@ -21,6 +21,30 @@ To install from source:
 go install github.com/larsakerlund/pimctl/cmd/pimctl@latest
 ```
 
+`pimctl version` prints the version, commit, Go version and platform of the
+binary you have; `pimctl --version` prints the same line.
+
+## Shell completion
+
+pimctl generates its own completion script. Context names, preset names and
+selection keys complete from local files, so a TAB press never calls Azure.
+For zsh, write the script to a directory on `$fpath`:
+
+```sh
+mkdir -p ~/.local/share/zsh/site-functions
+pimctl completion zsh > ~/.local/share/zsh/site-functions/_pimctl
+```
+
+If that directory is not already on `$fpath`, add this line to `~/.zshrc`
+above `compinit`:
+
+```sh
+fpath=(~/.local/share/zsh/site-functions $fpath)
+```
+
+`pimctl completion bash` and `pimctl completion fish` print the script for
+those shells; `pimctl completion SHELL --help` says where each one goes.
+
 ## Choose a login
 
 pimctl uses an existing Azure CLI login; it does not sign you in.
@@ -60,11 +84,14 @@ use `npx skills add ./ --skill pimctl`.
 
 ## Clear data or uninstall
 
-`pimctl cache clear` removes cached tokens, listings and policies.
+`pimctl cache clear` removes cached tokens, listings, policies and the probed
+cloudctx version.
 `pimctl cache clear --all` also forgets activations recorded on this machine;
 it **does not deactivate roles** and can make the next status under-report them.
-See [stored data](../SECURITY.md#what-pimctl-holds-and-where) for locations.
+See `pimctl cache path`, or [token caching](design.md#token-caching), for locations.
 
-To uninstall, remove `~/.local/bin/pimctl` and any shell completions you installed.
+To uninstall, remove `~/.local/bin/pimctl` and any shell completions you
+installed. `pimctl cache path` prints the cache directory if you want to remove
+that too.
 Presets and remembered justification remain in `$XDG_CONFIG_HOME/pimctl`
 (normally `~/.config/pimctl`); remove that directory only if you want to discard them.

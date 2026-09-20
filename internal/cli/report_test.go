@@ -19,12 +19,95 @@ import (
 func TestStreamProgressIsTerminalOnly(t *testing.T) {
 	cmd := NewRootCmd()
 	sp := term.NewSpinner(io.Discard, "")
-	// Tests never run on a TTY, so every case here must be nil.
-	if got := streamProgress(cmd, &globalOpts{output: "table"}, 5, sp, scopeLabeler{}); got != nil {
+	table, jsonOut := &globalOpts{output: "table"}, &globalOpts{output: outputJSON}
+	if got := streamProgressWith(cmd, table, noTTY(), 5, sp, scopeLabeler{}); got != nil {
 		t.Error("streaming must be off when stderr is not a terminal")
 	}
-	if got := streamProgress(cmd, &globalOpts{output: outputJSON}, 5, sp, scopeLabeler{}); got != nil {
+	// stdout being a terminal is not the question: the lines go to stderr.
+	if got := streamProgressWith(cmd, table, ttyOn(true, true, false), 5, sp, scopeLabeler{}); got != nil {
+		t.Error("streaming must be off when only stdout is a terminal")
+	}
+	if got := streamProgressWith(cmd, jsonOut, ttyOn(true, true, true), 5, sp, scopeLabeler{}); got != nil {
 		t.Error("streaming must be off under -o json")
+	}
+	if got := streamProgressWith(cmd, table, ttyOn(false, false, true), 5, sp, scopeLabeler{}); got == nil {
+		t.Error("streaming must be on when stderr is a terminal and the output is a table")
+	}
+}
+
+// TestStreamProgressRendersEachOutcome: on a terminal every role's outcome
+// lands as one line the moment it is known, in the order it landed, with the
+// scope named the way the tables name it. The captured output is what remains
+// after the spinner has erased itself, so it must hold the lines and nothing
+// of the spinner: no carriage return, no erase sequence, no frame.
+func TestStreamProgressRendersEachOutcome(t *testing.T) {
+	subScope := "/subscriptions/33333333-3333-3333-3333-333333333333"
+	scopes := newScopeLabeler([]scopeRef{{Name: "Contoso QA", ID: subScope}})
+	results := []result{
+		{Role: "Cost Management Contributor", Scope: subScope, ScopeName: "Contoso QA", Outcome: OutcomeActivated},
+		{
+			Role: "Resource Policy Contributor", Scope: "/providers/Microsoft.Management/managementGroups/contoso-prod",
+			Outcome: OutcomePending,
+		},
+		{Role: "Owner", Scope: "/subscriptions/abc", Outcome: OutcomeFailed, Detail: "MfaRule"},
+	}
+
+	cmd := NewRootCmd()
+	var errOut bytes.Buffer
+	cmd.SetErr(&errOut)
+	sp := term.NewSpinner(&errOut, "activating…")
+	defer sp.Stop()
+	stream := streamProgressWith(
+		cmd, &globalOpts{output: "table"}, ttyOn(false, false, true), len(results), sp, scopes,
+	)
+	if stream == nil {
+		t.Fatal("stderr is a terminal, so the run must stream")
+	}
+	for _, r := range results {
+		stream(r)
+	}
+	sp.Stop()
+
+	got := errOut.String()
+	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+	if len(lines) != len(results) {
+		t.Fatalf("got %d lines for %d results:\n%s", len(lines), len(results), got)
+	}
+	wants := [][]string{
+		{"ACTIVATED", "Cost Management Contributor", "Contoso QA"},
+		{"PENDING APPROVAL", "Resource Policy Contributor", "contoso-prod"},
+		{"FAILED", "Owner", "MfaRule"},
+	}
+	for i, want := range wants {
+		for _, w := range want {
+			if !strings.Contains(lines[i], w) {
+				t.Errorf("line %d %q is missing %q", i+1, lines[i], w)
+			}
+		}
+	}
+	if strings.Contains(got, "@ 33333333") {
+		t.Errorf("a streamed line must name the subscription, not its id:\n%s", got)
+	}
+	for _, residue := range []string{"\r", "\x1b[", "⠋", "activating…", "to go…"} {
+		if strings.Contains(got, residue) {
+			t.Errorf("the spinner must leave nothing behind, found %q:\n%s", residue, got)
+		}
+	}
+}
+
+// TestStreamedToNeedsBothHalves: a streamed run only skips the table when the
+// lines went to the same screen the table would go to. Streaming to a terminal
+// while stdout is a file still owes that file the full table.
+func TestStreamedToNeedsBothHalves(t *testing.T) {
+	stream := func(result) {}
+	if streamedToWith(nil, ttyOn(true, true, true)) {
+		t.Error("nothing was streamed, so nothing was seen")
+	}
+	if streamedToWith(stream, ttyOn(false, false, true)) {
+		t.Error("stdout is redirected, so the file still wants the table")
+	}
+	if !streamedToWith(stream, ttyOn(false, true, true)) {
+		t.Error("the lines and the table share a screen, so the table says nothing new")
 	}
 }
 

@@ -6,7 +6,11 @@ project_name: pimctl
 
 before:
   hooks:
-    - go mod tidy
+    # Verify, never tidy: a release must build exactly the go.sum the tag
+    # carries. `go mod tidy` here would let the runner rewrite it, and a release
+    # built from a module list nobody reviewed is not the tagged commit. CI's
+    # `go mod tidy -diff` is where an untidy module is caught.
+    - go mod verify
 
 builds:
   - id: pimctl
@@ -68,4 +72,4 @@ release:
         go install github.com/larsakerlund/pimctl/cmd/pimctl@{{ .Tag }}
 
     `pimctl` needs the Azure CLI, and cloudctx if you work across tenants.
-    See SECURITY.md for what it caches and where.
+    See `pimctl help auth` for what it caches and where.

@@ -1,6 +1,6 @@
-// Tests for the activation length flags: the spellings --for accepts, the two
-// deprecated aliases it supersedes, and the values that must be rejected
-// rather than quietly meaning "the policy maximum".
+// Tests for the activation length flag: the spellings --for accepts and the
+// values that must be rejected rather than quietly meaning "the policy
+// maximum".
 
 package cli
 
@@ -39,18 +39,12 @@ func TestResolveDuration(t *testing.T) {
 	}
 }
 
-// durationCmd builds a command whose --hours flag reports as explicitly set
+// durationCmd builds a command whose --for flag reports as explicitly set
 // only when the caller says so, mirroring cobra's Changed() semantics.
 func durationCmd(t *testing.T, set map[string]string) *cobra.Command {
 	t.Helper()
 	c := &cobra.Command{Use: "activate"}
-	var (
-		h float64
-		d string
-		f string
-	)
-	c.Flags().Float64Var(&h, "hours", 0, "")
-	c.Flags().StringVar(&d, "duration", "", "")
+	var f string
 	c.Flags().StringVar(&f, "for", "", "")
 	for k, v := range set {
 		if err := c.Flags().Set(k, v); err != nil {
@@ -60,43 +54,12 @@ func durationCmd(t *testing.T, set map[string]string) *cobra.Command {
 	return c
 }
 
-func TestRequestedDuration(t *testing.T) {
-	none := func() *cobra.Command { return durationCmd(t, nil) }
-	with := func(k, v string) *cobra.Command { return durationCmd(t, map[string]string{k: v}) }
-
-	if d, err := requestedDuration(none(), "", 0, ""); err != nil || d != 0 {
+func TestRequestedDurationUnset(t *testing.T) {
+	if d, err := requestedDuration(durationCmd(t, nil), ""); err != nil || d != 0 {
 		t.Errorf("no flags -> (%v, %v), want (0, nil) meaning the policy maximum", d, err)
 	}
-	if d, err := requestedDuration(with("hours", "1"), "", 1, ""); err != nil || d != time.Hour {
-		t.Errorf("--hours 1 -> (%v, %v)", d, err)
-	}
-	if d, err := requestedDuration(with("hours", "1.5"), "", 1.5, ""); err != nil || d != 90*time.Minute {
-		t.Errorf("--hours 1.5 -> (%v, %v)", d, err)
-	}
-	if d, err := requestedDuration(with("duration", "PT2H30M"), "", 0, "PT2H30M"); err != nil || d != 150*time.Minute {
-		t.Errorf("--duration PT2H30M -> (%v, %v)", d, err)
-	}
-	if _, err := requestedDuration(
-		durationCmd(t, map[string]string{"hours": "1", "duration": "PT2H"}),
-		"",
-		1,
-		"PT2H",
-	); err == nil {
-		t.Error("--hours together with --duration should be rejected")
-	}
-	if _, err := requestedDuration(with("duration", "x"), "", 0, "two hours"); err == nil {
-		t.Error("a malformed --duration should be rejected")
-	}
-	for _, h := range []float64{0, -1, -0.5} {
-		c := with("hours", "0")
-		if _, err := requestedDuration(c, "", h, ""); err == nil {
-			t.Errorf("--hours %v should be rejected, not read as 'use the maximum'", h)
-		} else if !strings.Contains(err.Error(), "greater than zero") {
-			t.Errorf("--hours %v error should explain: %q", h, err.Error())
-		}
-	}
-	if _, err := requestedDuration(with("duration", "PT0S"), "", 0, "PT0S"); err == nil {
-		t.Error("--duration PT0S should be rejected")
+	if d, err := requestedDuration(nil, ""); err != nil || d != 0 {
+		t.Errorf("nil command -> (%v, %v), want (0, nil) meaning the policy maximum", d, err)
 	}
 }
 
@@ -123,33 +86,78 @@ func TestParseFriendlyDuration(t *testing.T) {
 			t.Errorf("ParseFriendlyDuration(%q) = %v, want %v", in, got, want)
 		}
 	}
-	for _, bad := range []string{"", "two hours", "2 hours", "h", "2x", "-2h", "PT", "2h30"} {
+	// P107000D is enough days to overflow time.Duration into a negative number,
+	// which is not a duration anyone meant.
+	for _, bad := range []string{"", "two hours", "2 hours", "h", "2x", "-2h", "PT", "2h30", "P107000D"} {
 		if _, err := parseFriendlyDuration(bad); err == nil {
 			t.Errorf("ParseFriendlyDuration(%q) should have failed", bad)
 		}
 	}
 }
 
+// FuzzParseFriendlyDuration: whatever is typed after --for must not panic, and
+// what parses must be a non-negative duration; "0m" parses as zero by design,
+// and requestedDuration is what turns that into the "greater than zero" error.
+func FuzzParseFriendlyDuration(f *testing.F) {
+	for _, seed := range []string{
+		"2h", "90m", "1h30m", "45s", "1h30m10s", "PT2H30M", "pt1h", "P1D", " 2h ", "2H",
+		"", "two hours", "2 hours", "h", "2x", "-2h", "PT", "2h30", "0m", "PT0S", "P99999999999D",
+		"P107000D", // enough days to overflow time.Duration into a negative.
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		d, err := parseFriendlyDuration(in)
+		if err != nil {
+			return
+		}
+		if d < 0 {
+			t.Errorf("parseFriendlyDuration(%q) = %v, a negative duration with no error", in, d)
+		}
+	})
+}
+
+// FuzzRequestedDurationFor: the contract --for is held to. A value that is
+// accepted is strictly positive, because zero means "the policy maximum" to
+// the code downstream and must never be reached by typing it.
+func FuzzRequestedDurationFor(f *testing.F) {
+	for _, seed := range []string{"2h", "1h30m", "PT2H30M", "0m", "PT0S", "banana", "", "P99999999999D"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		cmd := durationCmd(t, map[string]string{"for": in})
+		d, err := requestedDuration(cmd, in)
+		if err == nil && d <= 0 {
+			t.Errorf("requestedDuration(--for %q) = %v with no error; zero would mean the policy maximum", in, d)
+		}
+	})
+}
+
 func TestRequestedDurationFor(t *testing.T) {
 	mk := func(v string) *cobra.Command { return durationCmd(t, map[string]string{"for": v}) }
-	if d, err := requestedDuration(mk("2h"), "2h", 0, ""); err != nil || d != 2*time.Hour {
+	if d, err := requestedDuration(mk("2h"), "2h"); err != nil || d != 2*time.Hour {
 		t.Errorf("--for 2h -> (%v, %v)", d, err)
 	}
-	if d, err := requestedDuration(mk("1h30m"), "1h30m", 0, ""); err != nil || d != 90*time.Minute {
+	if d, err := requestedDuration(mk("1h30m"), "1h30m"); err != nil || d != 90*time.Minute {
 		t.Errorf("--for 1h30m -> (%v, %v)", d, err)
 	}
-	if d, err := requestedDuration(mk("PT2H30M"), "PT2H30M", 0, ""); err != nil || d != 150*time.Minute {
+	if d, err := requestedDuration(mk("PT2H30M"), "PT2H30M"); err != nil || d != 150*time.Minute {
 		t.Errorf("--for PT2H30M -> (%v, %v)", d, err)
 	}
-	if _, err := requestedDuration(mk("0m"), "0m", 0, ""); err == nil {
-		t.Error("--for 0m must be rejected")
+	for _, zero := range []string{"0m", "0s", "PT0S"} {
+		_, err := requestedDuration(mk(zero), zero)
+		if err == nil {
+			t.Errorf("--for %s must be rejected, not read as 'use the maximum'", zero)
+		} else if err.Error() != "--for must be greater than zero (omit it to use each role's policy maximum)" {
+			t.Errorf("--for %s error should explain: %q", zero, err.Error())
+		}
 	}
-	if _, err := requestedDuration(mk("banana"), "banana", 0, ""); err == nil {
-		t.Error("--for banana must be rejected")
-	}
-	// --for supersedes, but giving both is a mistake worth naming.
-	both := durationCmd(t, map[string]string{"for": "2h", "hours": "1"})
-	if _, err := requestedDuration(both, "2h", 1, ""); err == nil {
-		t.Error("--for together with --hours should be rejected")
+	for _, bad := range []string{"banana", "two hours", ""} {
+		_, err := requestedDuration(mk(bad), bad)
+		if err == nil {
+			t.Errorf("--for %q must be rejected", bad)
+		} else if !strings.HasPrefix(err.Error(), "--for: ") {
+			t.Errorf("--for %q error should name the flag: %q", bad, err.Error())
+		}
 	}
 }

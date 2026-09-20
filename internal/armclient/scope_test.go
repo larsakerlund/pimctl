@@ -5,8 +5,10 @@
 package armclient
 
 import (
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestParseISODuration(t *testing.T) {
@@ -39,6 +41,72 @@ func TestParseISODuration(t *testing.T) {
 			t.Errorf("ParseISODuration(%q) should have failed", bad)
 		}
 	}
+}
+
+func TestParseISODurationRejectsAnythingBeyondTheBound(t *testing.T) {
+	// A component that would wrap the multiply, more digits than an int64
+	// holds, one that merely exceeds the bound, and a total that exceeds it
+	// across components: all the same error, naming the bound.
+	for _, bad := range []string{
+		"PT9223372036854775807H",
+		"PT99999999999999999999H",
+		"P1001D",
+		"P1000DT1S",
+		"PT24001H",
+	} {
+		d, err := ParseISODuration(bad)
+		if err == nil {
+			t.Errorf("ParseISODuration(%q) = %v, want an error", bad, d)
+			continue
+		}
+		if !strings.Contains(err.Error(), "1000 days") {
+			t.Errorf("ParseISODuration(%q) error should name the bound: %v", bad, err)
+		}
+	}
+	// The bound itself is inclusive.
+	for _, ok := range []string{"P1000D", "PT24000H", "P999DT24H"} {
+		d, err := ParseISODuration(ok)
+		if err != nil || d != MaxISODuration {
+			t.Errorf("ParseISODuration(%q) = %v, %v; want exactly the bound", ok, d, err)
+		}
+	}
+}
+
+// FuzzParseISODuration pins the two properties every accepted duration has:
+// it lies within [0, MaxISODuration], and rendering it with FormatISODuration
+// and parsing it again yields the same value. Anything else must be an error,
+// never a panic.
+func FuzzParseISODuration(f *testing.F) {
+	for _, seed := range []string{
+		"PT1H", "PT4H", "PT10H", "PT1H30M", "PT30M", "PT8H", "P1D", "PT2H30M15S", "pt1h",
+		"", "4H", "P", "PT", "P1Y", "P2M", "banana",
+		"PT9223372036854775807H", "P1001D", "P1000D", "PT0S", " PT1H ",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		d, err := ParseISODuration(in)
+		if err != nil {
+			return
+		}
+		if d < 0 || d > MaxISODuration {
+			t.Fatalf("ParseISODuration(%q) = %v, outside [0, %v]", in, d, MaxISODuration)
+		}
+		iso := FormatISODuration(d)
+		back, err := ParseISODuration(iso)
+		if err != nil {
+			t.Fatalf(
+				"ParseISODuration(%q) = %v, but FormatISODuration gave %q which does not parse: %v",
+				in,
+				d,
+				iso,
+				err,
+			)
+		}
+		if back != d {
+			t.Fatalf("round trip %q -> %v -> %q -> %v", in, d, iso, back)
+		}
+	})
 }
 
 func TestFormatISODuration(t *testing.T) {
@@ -131,5 +199,35 @@ func TestTruncateMiddle(t *testing.T) {
 	}
 	if got[:5] != "/subs" {
 		t.Errorf("head not preserved: %q", got)
+	}
+}
+
+func TestTruncateMiddleCutsOnRunesNotBytes(t *testing.T) {
+	// A Swedish name is longer in bytes than in runes, and an emoji is four
+	// bytes for one rune: the width is in runes, both ends are whole
+	// characters, and a name that fits in runes is left alone even when its
+	// byte length would not.
+	cases := []struct {
+		in    string
+		width int
+		want  string
+	}{
+		{"Kostnadshanteringsdeltagare för Sjöfartsverket", 20, "Kostnadsh…artsverket"},
+		{"Prenumeration för Åkerlund", 26, "Prenumeration för Åkerlund"},
+		{"Sjöfart 🚢 Östersjön 🌊", 10, "Sjöf…jön 🌊"},
+		{"ÅÄÖåäö", 6, "ÅÄÖåäö"},
+		{"ÅÄÖåäöÅÄÖ", 5, "ÅÄ…ÄÖ"},
+	}
+	for _, c := range cases {
+		got := TruncateMiddle(c.in, c.width)
+		if got != c.want {
+			t.Errorf("TruncateMiddle(%q, %d) = %q, want %q", c.in, c.width, got, c.want)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("TruncateMiddle(%q, %d) = %q cut a rune in half", c.in, c.width, got)
+		}
+		if n := utf8.RuneCountInString(got); n > c.width {
+			t.Errorf("TruncateMiddle(%q, %d) is %d runes wide", c.in, c.width, n)
+		}
 	}
 }

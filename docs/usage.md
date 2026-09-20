@@ -24,6 +24,7 @@ Use `down --project` or `status --project` to select only the file's roles.
 | Install pimctl or choose an Azure/cloudctx login | [Setup and accounts](setup.md) |
 | Resolve a failed request or uncertain status | [Troubleshooting](troubleshooting.md) |
 
-For all flags, use `pimctl COMMAND --help`. `activate` and `list` are aliases
-for `up` and `ls`; `deactivate` opens a picker instead of `down`'s all-active
-selection.
+For all flags, use `pimctl COMMAND --help`. `ls` is an alias of `list`.
+`activate` and `deactivate` are older spellings kept for existing scripts:
+`activate` does what `up` does, and `deactivate` opens a picker where `down`
+selects every active role.

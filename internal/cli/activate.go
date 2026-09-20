@@ -37,12 +37,9 @@ type activateOpts struct {
 	keys       []string
 	preset     string // --preset: a saved selection, which also supplies the contexts.
 	savePreset string // --save-preset: save this run's selection under that name.
-	// forDuration, hours and duration are the three spellings of the
-	// activation length — only one may be given, and the latter two are
-	// deprecated. All empty or zero means each role's policy maximum.
+	// forDuration is --for, the activation length. Empty means each role's
+	// policy maximum.
 	forDuration string
-	hours       float64 // --hours, deprecated.
-	duration    string  // --duration, deprecated.
 	// justification is -j. It lands in the PIM audit log, and is required when
 	// there is no terminal to prompt on.
 	justification string
@@ -133,7 +130,7 @@ is reported per role.`,
 		&o.keys,
 		"key",
 		nil,
-		"select roles by the stable key shown in `pimctl list` (repeatable; prefixes allowed)",
+		"select roles by the stable key shown in 'pimctl list' (repeatable; prefixes allowed)",
 	)
 	f.StringVar(&o.preset, "preset", "", "select the roles saved in this preset")
 	f.StringVar(&o.savePreset, "save-preset", "", "save the selection under this preset name")
@@ -144,12 +141,6 @@ is reported per role.`,
 		"how long to activate for: 2h, 90m, 1h30m or PT2H30M (default: each role's policy maximum)",
 	)
 	f.BoolVar(&o.force, "force", false, "allow a non-interactive selection of more than 10 roles")
-	f.Float64Var(&o.hours, "hours", 0, "")
-	f.StringVar(&o.duration, "duration", "", "")
-	// MarkDeprecated only fails when the flag does not exist; both are defined
-	// two lines up, so the error is unreachable.
-	f.MarkDeprecated("hours", "use --for instead, e.g. --for 2h")         //nolint:errcheck // see above
-	f.MarkDeprecated("duration", "use --for instead, e.g. --for PT2H30M") //nolint:errcheck // see above
 	f.StringVarP(&o.justification, "justification", "j", "", "justification sent with every activation")
 	f.StringVar(&o.ticketNumber, "ticket-number", "", "ticket number, for roles whose policy requires ticketing")
 	f.StringVar(&o.ticketSystem, "ticket-system", "", "ticket system name, used with --ticket-number")
@@ -160,20 +151,21 @@ is reported per role.`,
 
 // checkActivateFlags rejects, before any network call, the flag combinations
 // that cannot work — so `pimctl up < /dev/null` says it needs a terminal
-// without first paying for a token and a listing.
-func checkActivateFlags(o *activateOpts) error {
+// without first paying for a token and a listing. tty is what answers whether
+// there is a terminal to pick, confirm and justify on.
+func checkActivateFlags(o *activateOpts, tty ttyProbe) error {
 	if err := checkSelectionFlags(o.all, o.preset, o.roles, o.scopes, o.keys); err != nil {
 		return err
 	}
 	hasSelection := o.requirements != nil || o.all || o.preset != "" || len(o.roles) > 0 || len(o.scopes) > 0 ||
 		len(o.keys) > 0
-	if !hasSelection && !term.StdinIsTTY() {
+	if !hasSelection && !tty.stdinIsTTY() {
 		return errNoTTY("role selection")
 	}
-	if !o.yes && !term.StdinIsTTY() {
+	if !o.yes && !tty.stdinIsTTY() {
 		return errNoConfirmTTY
 	}
-	if !term.StdinIsTTY() && strings.TrimSpace(o.justification) == "" {
+	if !tty.stdinIsTTY() && strings.TrimSpace(o.justification) == "" {
 		return errors.New("-j/--justification is required when not running interactively.\n" +
 			"The justification is written to the PIM audit log, so pimctl will not silently reuse the last one you typed")
 	}
@@ -196,7 +188,7 @@ func checkActivateFlags(o *activateOpts) error {
 // that is waiting on an approver, is carried out through [reportRun] as an exit
 // code instead.
 func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) error {
-	requested, err := prepareActivation(cmd, opts, o)
+	requested, err := prepareActivation(cmd, opts, d.tty, o)
 	if err != nil {
 		return err
 	}
@@ -214,13 +206,13 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 	}
 	defer rc.finish(cmd)
 	if o.requirements != nil {
-		return runProjectActivation(cmd, rc, o, requested)
+		return runProjectActivation(cmd, rc, d.tty, o, requested)
 	}
 	rows, listErrs, future := readActivationEligibility(cmd, rc, o, presetEntries)
 	failures := slices.Concat(rc.Failures, listErrs)
 	reportContextFailures(cmd.ErrOrStderr(), failures)
 
-	selected, interactive, err := chooseRows(cmd, rc, rows, o, presetEntries)
+	selected, interactive, err := chooseRows(cmd, rc, d.tty, rows, o, presetEntries)
 	if err != nil {
 		return err
 	}
@@ -237,17 +229,25 @@ func runActivate(cmd *cobra.Command, opts *globalOpts, d deps, o *activateOpts) 
 	if future == nil {
 		future = startActivationListing(rc.Ctx, rc, targetScopes(selected))
 	}
-	return finishActivation(cmd, rc, o, requested, rows, selected, interactive, future, failures)
+	return finishActivation(cmd, rc, d.tty, o, requested, rows, selected, interactive, future, failures)
 }
 
 // finishActivation plans and submits a resolved selection through the shared
 // policy, justification and reporting pipeline. Failures remain per role once
 // requests have been sent; project preflight errors abort before submission.
-func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, requested time.Duration,
+//
+// failures are the context and eligibility problems already reported before
+// the selection; they make the run incomplete and so exit 1. The activation
+// listing behind future is not in that set: it is advisory to `up`, which ends
+// on ARM's answer to each request, so a scope it could not read is noted after
+// the results and never changes the exit code. tty decides what may be asked
+// and streamed: a justification prompt, the confirmation, the per-role lines.
+func finishActivation(cmd *cobra.Command, rc *runContext, tty ttyProbe, o *activateOpts, requested time.Duration,
 	rows, selected []row, interactive bool, future *activeFuture, failures []error,
 ) error {
 	ctx, opts := rc.Ctx, rc.Opts
-	failures = append(failures, markAlreadyActive(selected, future)...)
+	check := &activeCheck{future: future}
+	markAlreadyActive(selected, check)
 
 	// The plan comes first because it carries the policies, and the policies
 	// decide whether a justification is even wanted.
@@ -264,7 +264,7 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 			return err
 		}
 	}
-	justification, err := resolveJustification(o.justification, interactive || o.requirements != nil, plan)
+	justification, err := resolveJustification(o.justification, interactive || o.requirements != nil, tty, plan)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 	// still says *which* "Contoso landing zones" is about to be elevated.
 	scopes := scopeLabelerForRows(rows)
 
-	proceed, err := confirmPlan(cmd, opts, confirmOpts{
+	proceed, err := confirmPlanWith(cmd, opts, tty, confirmOpts{
 		Yes:         o.yes,
 		Interactive: interactive,
 		All:         o.all,
@@ -291,7 +291,7 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 
 	// Activation is as slow as Azure is; it must not look dead while it runs.
 	sp := term.NewSpinner(cmd.ErrOrStderr(), fmt.Sprintf("activating %s…", roleCount(len(plan))))
-	stream := streamProgress(cmd, opts, len(plan), sp, scopes)
+	stream := streamProgressWith(cmd, opts, tty, len(plan), sp, scopes)
 	results := executeActivations(
 		ctx, plan, justification, o.ticketNumber, o.ticketSystem, o.noWait, rc.Timeouts.poll,
 		onEachResult(stream),
@@ -302,24 +302,29 @@ func finishActivation(cmd *cobra.Command, rc *runContext, o *activateOpts, reque
 	// That needs the activation listing, so wait for it here — but only if a
 	// result actually wants it, and only briefly. By this point the activations
 	// have made a full ARM round-trip, so it has almost always landed already.
-	if needsActiveWindow(results) {
-		if res, ok := future.Wait(rc.Timeouts.activeBackfill); ok {
-			failures = append(failures, res.errs...)
-			results = fillAlreadyActiveWindows(results, res.rows)
-		}
+	if needsActiveWindow(results) && check.wait(rc.Timeouts.activeBackfill) {
+		results = fillAlreadyActiveWindows(results, check.res.rows)
 	}
 
 	// Requests have already been sent to ARM, so nothing below may return early
 	// — the user must always see which roles activated and the right exit code.
 	rememberActivateRun(cmd, activationJustification(plan, justification), o.savePreset, selected)
-	return reportRun(cmd, opts, results, failures, multi, streamedTo(stream), scopes)
+	runErr := reportRun(cmd, opts, results, failures, multi, streamedToWith(stream, tty), scopes)
+	// The listing may have landed while the requests were in flight; what it
+	// says about scopes it could not read belongs under the table, as a caveat
+	// on the dimming and the UNTIL column, not in the exit code.
+	check.tryGet()
+	reportUnreadScopes(cmd.ErrOrStderr(), rc, "the already-active check", check.failures(), check.unread())
+	return runErr
 }
 
 // chooseRows narrows the eligible roles down to what the user asked for, and
-// says so plainly when there is nothing to work with.
+// says so plainly when there is nothing to work with. tty is what decides
+// whether the picker may be shown, and is passed on to [selectRows].
 func chooseRows(
 	cmd *cobra.Command,
 	rc *runContext,
+	tty ttyProbe,
 	rows []row,
 	o *activateOpts,
 	presetEntries []config.PresetEntry,
@@ -327,7 +332,7 @@ func chooseRows(
 	if len(rows) == 0 {
 		return nil, false, errors.New("you have no eligible Azure resource roles in the selected context(s)")
 	}
-	selected, interactive, err = selectRows(cmd, rc, rows, o, presetEntries)
+	selected, interactive, err = selectRows(cmd, rc, tty, rows, o, presetEntries)
 	if err != nil {
 		return nil, false, err
 	}
@@ -343,10 +348,12 @@ func chooseRows(
 const maxNonInteractive = 10
 
 // selectRows resolves the selection flags, falling back to the interactive
-// multi-select when none were given.
+// multi-select when none were given; tty is the probe that multi-select
+// reports its summary line through.
 func selectRows(
 	cmd *cobra.Command,
 	rc *runContext,
+	tty ttyProbe,
 	rows []row,
 	o *activateOpts,
 	presetEntries []config.PresetEntry,
@@ -384,22 +391,71 @@ func selectRows(
 	// The dimming comes from the local record, which is available immediately.
 	// The ARM fan-out lands seconds after the picker paints, so a picker fed
 	// from it would show the marks after the user had already chosen.
-	sel, err := selectInteractive(applyLocalRecord(rows, rc), multipleContexts(rows), scopeLabelerForRows(rows))
+	sel, err := selectInteractive(applyLocalRecord(rows, rc), multipleContexts(rows), scopeLabelerForRows(rows), tty)
 	return sel, true, err
+}
+
+// activeCheck is the background activation listing as `up` consumes it. The
+// listing is advisory here: it dims the rows that are already held and
+// supplies the window an ALREADY ACTIVE result reports, while ARM's answer to
+// each request decides every outcome. So it is read into one snapshot however
+// many times it is consulted, and a scope it could not read is named exactly
+// once, after the results, and never counted as a failure of the run.
+type activeCheck struct {
+	future *activeFuture // the listing, possibly still in flight; nil means it was never started.
+	res    activeResult  // the listing once it has landed; the zero value until then.
+	landed bool          // whether res holds the listing.
+}
+
+// tryGet takes the listing if it has already landed and reports whether it
+// has. It never blocks; see [activeFuture.TryGet].
+func (c *activeCheck) tryGet() bool {
+	if !c.landed {
+		c.res, c.landed = c.future.TryGet()
+	}
+	return c.landed
+}
+
+// wait blocks up to timeout for the listing and reports whether it landed in
+// time; see [activeFuture.Wait]. A listing already taken returns at once.
+func (c *activeCheck) wait(timeout time.Duration) bool {
+	if !c.landed {
+		c.res, c.landed = c.future.Wait(timeout)
+	}
+	return c.landed
+}
+
+// failures returns the errors from the scopes the listing could not read, or
+// nil while the listing has not landed: nothing was checked, so nothing was
+// found wanting.
+func (c *activeCheck) failures() []error {
+	if !c.landed {
+		return nil
+	}
+	return c.res.errs
+}
+
+// unread returns the scopes the listing left unknown — the ones that failed
+// and the ones that ran out of soft deadline — or nil while the listing has
+// not landed. A scope that timed out dims no row and fills no UNTIL column, so
+// it belongs in the note beside the ones that failed outright; which of the
+// two a scope was is [activationScope.Errored].
+func (c *activeCheck) unread() []activationScope {
+	if !c.landed {
+		return nil
+	}
+	return c.res.unconfirmed
 }
 
 // markAlreadyActive marks the rows the slow activation listing says are already
 // held, if that listing has landed. It never waits for it: ARM answers
 // RoleAssignmentExists and pimctl reports ALREADY ACTIVE, which is the same
 // information a moment later.
-func markAlreadyActive(selected []row, future *activeFuture) []error {
-	res, ok := future.TryGet()
-	if !ok {
-		return nil
+func markAlreadyActive(selected []row, check *activeCheck) {
+	if !check.tryGet() {
+		return
 	}
-	active, activeErrs := res.rows, res.errs
-	copy(selected, applyActive(slices.Clone(selected), active))
-	return activeErrs
+	copy(selected, applyActive(slices.Clone(selected), check.res.rows))
 }
 
 // needsActiveWindow reports whether any already-active result is missing the
@@ -467,19 +523,26 @@ func savePreset(name string, rows []row) error {
 }
 
 // prepareActivation validates local selection and duration before opening any
-// login. Automatic project discovery is resolved before terminal requirements.
-func prepareActivation(cmd *cobra.Command, opts *globalOpts, o *activateOpts) (time.Duration, error) {
+// login. Automatic project discovery is resolved before terminal requirements,
+// which tty answers. It returns the requested activation length, zero when a
+// flag, the duration or the absent terminal makes the run impossible.
+func prepareActivation(
+	cmd *cobra.Command,
+	opts *globalOpts,
+	tty ttyProbe,
+	o *activateOpts,
+) (time.Duration, error) {
 	if err := validateFlags(opts); err != nil {
 		return 0, err
 	}
 	if err := resolveActivationProject(cmd, o); err != nil {
 		return 0, err
 	}
-	requested, err := requestedDuration(cmd, o.forDuration, o.hours, o.duration)
+	requested, err := requestedDuration(cmd, o.forDuration)
 	if err != nil {
 		return 0, err
 	}
-	if flagErr := checkActivateFlags(o); flagErr != nil {
+	if flagErr := checkActivateFlags(o, tty); flagErr != nil {
 		return 0, flagErr
 	}
 	return requested, nil

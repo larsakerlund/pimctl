@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/larsakerlund/pimctl/internal/armclient"
+	"github.com/larsakerlund/pimctl/internal/azauth"
 	"github.com/larsakerlund/pimctl/internal/cache"
 )
 
@@ -126,7 +127,7 @@ func activateOne(
 		ticketSystem,
 		time.Now(),
 	)
-	sr, err := item.Session.Client.SubmitRequest(ctx, item.Row.Elig.Properties.Scope, item.RequestName, body)
+	sr, err := submitRequest(ctx, item.Session, item.Row.Elig.Properties.Scope, item.RequestName, body)
 	if err != nil {
 		if ctx.Err() != nil {
 			res.Outcome = OutcomeAborted
@@ -142,25 +143,95 @@ func activateOne(
 	res.RequestID = sr.ID
 	res.Status = sr.Properties.Status
 	if !noWait {
-		polled, perr := item.Session.Client.Poll(ctx, sr, pollTimeout)
-		if polled != nil {
-			sr = polled
-			res.Status = sr.Properties.Status
-		}
-		switch {
-		case errors.Is(perr, context.Canceled), errors.Is(perr, context.DeadlineExceeded):
-			// Do not pretend we waited out the poll timeout: say the request was
-			// submitted and its fate is unknown.
-			res.Outcome = OutcomeAborted
-			res.Detail = fmt.Sprintf("interrupted while waiting (last status %s) — check `pimctl status`", res.Status)
-			return res
-		case perr != nil:
-			res.Outcome = OutcomeFailed
-			res.Detail = perr.Error()
-			return res
-		}
+		return pollToOutcome(ctx, item.Session, res, sr, OutcomeActivated, pollTimeout)
 	}
 	return classifyRequest(res, sr, noWait, OutcomeActivated, pollTimeout)
+}
+
+// submitRequest sends one schedule request through the session's client, with
+// the same 401 handling the listing calls get: a cached token ARM has stopped
+// accepting is dropped and replaced once, and the PUT is sent again. That is
+// safe because a 401 is refused before ARM looks at the body, so nothing was
+// created by the first attempt.
+func submitRequest(
+	ctx context.Context,
+	s *session,
+	scope, requestName string,
+	body armclient.RequestBody,
+) (*armclient.ScheduleRequest, error) {
+	var sr *armclient.ScheduleRequest
+	err := retryOn401(s, func() error {
+		var e error
+		sr, e = s.Client.SubmitRequest(ctx, scope, requestName, body)
+		return e
+	})
+	return sr, err
+}
+
+// pollToOutcome waits for a submitted request to reach a terminal status and
+// maps what it saw onto an outcome. Activation and deactivation share it so the
+// three ways a poll can end read the same for both: the user's cancellation is
+// ABORTED, because the request may well have been granted; a request ARM
+// stopped answering for goes to [classifyUnread]; and a terminal or timed-out
+// status goes through [classifyRequest].
+//
+// A 401 on a cached token mid-poll is absorbed by [retryOn401], which replaces
+// the credential and polls again from the submitted request.
+func pollToOutcome(
+	ctx context.Context,
+	s *session,
+	res result,
+	sr *armclient.ScheduleRequest,
+	successOutcome outcome,
+	pollTimeout time.Duration,
+) result {
+	var polled *armclient.ScheduleRequest
+	perr := retryOn401(s, func() error {
+		var e error
+		polled, e = s.Client.Poll(ctx, sr, pollTimeout)
+		return e
+	})
+	if polled != nil {
+		sr = polled
+		res.Status = sr.Properties.Status
+	}
+	switch {
+	case errors.Is(perr, context.Canceled), errors.Is(perr, context.DeadlineExceeded):
+		// Do not pretend we waited out the poll timeout: say the request was
+		// submitted and its fate is unknown.
+		res.Outcome = OutcomeAborted
+		res.Detail = fmt.Sprintf("interrupted while waiting (last status %s) — check `pimctl status`", res.Status)
+		return res
+	case perr != nil:
+		return classifyUnread(res, sr, perr, successOutcome, pollTimeout)
+	}
+	return classifyRequest(res, sr, false, successOutcome, pollTimeout)
+}
+
+// classifyUnread is the outcome for a request ARM stopped answering for: the
+// poll ended on a read error rather than on a status. ARM had accepted the
+// request, so it may well be provisioned by now, and FAILED would claim the
+// access is not held when nobody knows. It reads like the timed-out case
+// instead — STILL PENDING with the last observed status, exit 1, and "check
+// pimctl status" — unless the last status ARM did return was already terminal,
+// in which case that answer stands and is classified normally, so a good final
+// status still reaches the record.
+func classifyUnread(
+	res result,
+	sr *armclient.ScheduleRequest,
+	perr error,
+	successOutcome outcome,
+	pollTimeout time.Duration,
+) result {
+	if sr != nil && armclient.IsTerminalStatus(sr.Properties.Status) {
+		return classifyRequest(res, sr, false, successOutcome, pollTimeout)
+	}
+	res.Outcome = OutcomeWaiting
+	res.Detail = fmt.Sprintf(
+		"could not read the request back (last status %s): %v — its fate is unknown; check `pimctl status`",
+		res.Status, perr,
+	)
+	return res
 }
 
 // classifyRequest turns an ARM request status into a user-facing outcome.
@@ -171,10 +242,12 @@ func activateOne(
 // successOutcome, and for an activation also carries the window ARM granted;
 // a pending-approval status becomes PENDING APPROVAL, the one outcome that
 // earns exit code 2, because the change has not taken effect and only an
-// approver can make it; an explicit failure status becomes FAILED;
-// and anything still short of a terminal status is SUBMITTED under --no-wait
-// or STILL PENDING otherwise. STILL PENDING is a plain failure (exit 1), not a
-// second flavour of "waiting for an approver": there is nobody to resolve it.
+// approver can make it; an explicit failure status becomes FAILED, worded by
+// [failureDetail] — an activation that ended Revoked or Expired is a failure
+// too, and is said to be over rather than stalled; and anything still short of
+// a terminal status is SUBMITTED under --no-wait or STILL PENDING otherwise.
+// STILL PENDING is a plain failure (exit 1), not a second flavour of "waiting
+// for an approver": there is nobody to resolve it.
 func classifyRequest(
 	res result,
 	sr *armclient.ScheduleRequest,
@@ -183,10 +256,7 @@ func classifyRequest(
 	pollTimeout time.Duration,
 ) result {
 	status := sr.Properties.Status
-	requestType := armclient.RequestTypeSelfActivate
-	if successOutcome == OutcomeDeactivated {
-		requestType = armclient.RequestTypeSelfDeactivate
-	}
+	requestType := requestTypeFor(successOutcome)
 	switch {
 	case armclient.IsSuccessStatusFor(requestType, status):
 		res.Outcome = successOutcome
@@ -197,9 +267,9 @@ func classifyRequest(
 	case armclient.IsPendingApprovalStatus(status):
 		res.Outcome = OutcomePending
 		res.Detail = "waiting for an approver"
-	case armclient.IsFailureStatus(status):
+	case armclient.IsFailureStatusFor(requestType, status):
 		res.Outcome = OutcomeFailed
-		res.Detail = "request status " + status
+		res.Detail = failureDetail(status)
 	case noWait:
 		res.Outcome = OutcomeSubmitted
 		res.Detail = "not polled (--no-wait); status " + status
@@ -208,6 +278,31 @@ func classifyRequest(
 		res.Detail = fmt.Sprintf("still %s after %s — the access is not held", status, pollTimeout)
 	}
 	return res
+}
+
+// requestTypeFor maps the success outcome a caller is aiming at back to the ARM
+// request type it submitted. The status predicates need it because Revoked is
+// the success of one type and the failure of the other.
+func requestTypeFor(successOutcome outcome) string {
+	if successOutcome == OutcomeDeactivated {
+		return armclient.RequestTypeSelfDeactivate
+	}
+	return armclient.RequestTypeSelfActivate
+}
+
+// failureDetail words a bad terminal status. A revoked or lapsed request is
+// spelled out as over, because "request status Revoked" reads, to someone who
+// just ran `up`, like a step that has yet to happen; every other failure
+// status is reported as ARM named it.
+func failureDetail(status string) string {
+	switch {
+	case status == armclient.StatusExpired:
+		return "the request expired before it was granted (status Expired) — the access is not held"
+	case armclient.IsRevocationStatus(status):
+		return fmt.Sprintf("the access was revoked (status %s) — it is not held", status)
+	default:
+		return "request status " + status
+	}
 }
 
 // activationStart is when ARM says the window opened.
@@ -261,7 +356,10 @@ func activationEnd(sr *armclient.ScheduleRequest) *time.Time {
 }
 
 // applyRequestError maps an ARM failure onto a result, including the
-// already-active special case and the Conditional Access recovery command.
+// already-active special case, the open-request refusal that must not be
+// mistaken for it, and the Conditional Access recovery command. The claims
+// challenge has a side effect: the cached token for the session's context is
+// deleted, because no run can succeed with it.
 func applyRequestError(res result, s *session, err error, alreadyActiveUntil *time.Time) result {
 	var ae *armclient.APIError
 	if !errors.As(err, &ae) {
@@ -280,6 +378,20 @@ func applyRequestError(res result, s *session, err error, alreadyActiveUntil *ti
 		// so show it rather than making the user run `pimctl status` to find
 		// out how much of it is left.
 		res.Until = alreadyActiveUntil
+	case armclient.KindRequestExists:
+		// An open request is not a held role: ARM refuses a second request
+		// while an earlier one is undecided, which is what an activation still
+		// waiting on an approver looks like from here. The outstanding request
+		// cannot be read back — the client addresses a request by its id, and
+		// ARM's refusal does not carry one — so this is a plain failure: exit
+		// 1, and nothing written to the record, which holds only access this
+		// machine has seen granted.
+		res.Outcome = OutcomeFailed
+		res.Detail = fmt.Sprintf(
+			"request exists (%s): an earlier request for this role is still open, so the role is not held — "+
+				"check `pimctl status`, then wait for that request to be decided or withdraw it in the portal",
+			ae.Code,
+		)
 	case armclient.KindPolicyValidation:
 		// The cached policy is now known to disagree with ARM's, so drop it:
 		// the next run re-reads rather than repeating the same rejection.
@@ -291,8 +403,12 @@ func applyRequestError(res result, s *session, err error, alreadyActiveUntil *ti
 			res.Detail = ae.Error()
 		}
 	case armclient.KindClaimsChallenge:
+		// The cached token cannot satisfy this challenge, so it goes now:
+		// left in place, every warm run until it expired would reuse it and
+		// fail the same way. The recovery command mints one that can.
+		azauth.DropTokenCache(s.Token.Context, azauth.DefaultRunner)
 		res.Outcome = OutcomeFailed
-		res.Detail = ae.Error()
+		res.Detail = ae.Error() + " — the cached token has been dropped; after re-authenticating, rerun with --refresh"
 		res.Recovery = ae.RecoveryCommand(s.Context, s.Token.TenantID)
 	default:
 		res.Outcome = OutcomeFailed
@@ -341,7 +457,7 @@ func deactivateOne(ctx context.Context, row target, noWait bool, pollTimeout tim
 		return res
 	}
 	body := buildDeactivateBody(row.Session.Token.PrincipalID, row.RoleDefinitionID)
-	sr, err := row.Session.Client.SubmitRequest(ctx, row.Scope, res.RequestName, body)
+	sr, err := submitRequest(ctx, row.Session, row.Scope, res.RequestName, body)
 	if err != nil {
 		if ctx.Err() != nil {
 			res.Outcome = OutcomeAborted
@@ -381,26 +497,12 @@ func deactivateOne(ctx context.Context, row target, noWait bool, pollTimeout tim
 	}
 	res.RequestID = sr.ID
 	res.Status = sr.Properties.Status
-	if !noWait {
-		polled, perr := row.Session.Client.Poll(ctx, sr, pollTimeout)
-		if polled != nil {
-			sr = polled
-			res.Status = sr.Properties.Status
-		}
-		switch {
-		case errors.Is(perr, context.Canceled), errors.Is(perr, context.DeadlineExceeded):
-			res.Outcome = OutcomeAborted
-			res.Detail = fmt.Sprintf("interrupted while waiting (last status %s) — check `pimctl status`", res.Status)
-			return res
-		case perr != nil:
-			res.Outcome = OutcomeFailed
-			res.Detail = perr.Error()
-			return res
-		}
-	}
 	// Shared with activate so the two cannot drift — in particular so a
 	// deactivation queued for approval is reported as such rather than as a
 	// poll timeout.
+	if !noWait {
+		return pollToOutcome(ctx, row.Session, res, sr, OutcomeDeactivated, pollTimeout)
+	}
 	return classifyRequest(res, sr, noWait, OutcomeDeactivated, pollTimeout)
 }
 

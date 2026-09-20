@@ -59,10 +59,17 @@ type Model struct {
 	filter string // what has been typed, lower-cased and matched against each item's haystack.
 	// top is the first visible row of the window, an index into shown.
 	top int
-	// height is how many rows are drawn at once; a non-positive value is
-	// clamped to a default in clampWindow.
+	// height is how many rows the caller asked to see at once; a non-positive
+	// value falls back to ten. It is the ceiling, not the drawn count: rows()
+	// lowers it when the terminal reported by termRows cannot hold it.
 	height int
-	title  string // drawn above the list, with the count and the key hints.
+	// termRows is the terminal height in lines from the last tea.WindowSizeMsg,
+	// or zero until one arrives. The picker draws inline, and bubbletea's
+	// inline renderer keeps only the bottom terminal-height lines of a frame,
+	// so a window taller than the terminal loses its title, header and filter
+	// line off the top instead of scrolling.
+	termRows int
+	title    string // drawn above the list, with the count and the key hints.
 
 	// confirmed and aborted are how the model tells Run why it quit, and also
 	// make View draw nothing on the final frame.
@@ -75,9 +82,40 @@ type Model struct {
 // and mutates their selection state in place. Use it directly only in a test —
 // production callers want [Run], which also drives the terminal.
 func NewModel(title string, items []Item, height int) *Model {
+	if height <= 0 {
+		height = defaultHeight
+	}
 	m := &Model{items: items, height: height, title: title}
 	m.refilter()
 	return m
+}
+
+// defaultHeight is the row count a non-positive height in [NewModel] falls
+// back to.
+const defaultHeight = 10
+
+// chromeLines is how many lines of a frame are not list rows: the title, the
+// counts-and-keys header, the filter line and the "… N more" footer. A
+// resize subtracts it from the terminal height to find the room left for rows.
+const chromeLines = 4
+
+// rows returns how many list rows are drawn at once: the requested height,
+// lowered to what the terminal can hold beside the chrome once a resize has
+// reported its size, and never below one so the cursor row is always on screen.
+func (m *Model) rows() int {
+	if m.termRows <= 0 {
+		return m.height
+	}
+	return max(1, min(m.height, m.termRows-chromeLines))
+}
+
+// resize records the terminal height in lines and re-clamps the window, so a
+// shrink keeps the cursor row on screen and a grow lets the window widen again
+// up to the requested height. Only the height matters: labels arrive already
+// truncated by the caller, so width is not the picker's concern.
+func (m *Model) resize(termRows int) {
+	m.termRows = termRows
+	m.clampWindow()
 }
 
 // refilter recomputes the visible set for the current filter, keeping the
@@ -108,13 +146,13 @@ func (m *Model) refilter() {
 }
 
 // clampWindow puts the cursor back inside the filtered set and scrolls the
-// window the least amount that brings the cursor into view. Every navigation
-// and filter change ends here, so no other code has to reason about the
-// boundaries.
+// window the least amount that brings the cursor into view, then pulls the
+// window up so it is full whenever the list has enough rows to fill it — a
+// window left where a smaller one ended would otherwise draw a short tail after
+// the terminal grows. Every navigation, filter change and resize ends here, so
+// no other code has to reason about the boundaries.
 func (m *Model) clampWindow() {
-	if m.height <= 0 {
-		m.height = 10
-	}
+	rows := m.rows()
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
@@ -124,12 +162,10 @@ func (m *Model) clampWindow() {
 	if m.cursor < m.top {
 		m.top = m.cursor
 	}
-	if m.cursor >= m.top+m.height {
-		m.top = m.cursor - m.height + 1
+	if m.cursor >= m.top+rows {
+		m.top = m.cursor - rows + 1
 	}
-	if m.top < 0 {
-		m.top = 0
-	}
+	m.top = max(0, min(m.top, len(m.shown)-rows))
 }
 
 // selectedCount counts selected items across the whole list, not just the
@@ -173,10 +209,14 @@ func (m *Model) toggleAllShown() {
 func (*Model) Init() tea.Cmd { return nil }
 
 // Update applies one keypress and returns the model, plus tea.Quit on the keys
-// that end the picker. Everything that is not a key — resizes, ticks — is
-// ignored, since the view is redrawn from scratch each frame anyway. It
-// satisfies tea.Model.
+// that end the picker. A tea.WindowSizeMsg refits the window to the terminal;
+// every other non-key message — ticks, focus reports — is ignored, since the
+// view is redrawn from scratch each frame anyway. It satisfies tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m.resize(size.Height)
+		return m, nil
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -293,7 +333,8 @@ func (m *Model) View() string {
 		return b.String()
 	}
 
-	end := min(m.top+m.height, len(m.shown))
+	rows := m.rows()
+	end := min(m.top+rows, len(m.shown))
 	for pos := m.top; pos < end; pos++ {
 		i := m.shown[pos]
 		cursor := "  "
@@ -314,9 +355,9 @@ func (m *Model) View() string {
 			fmt.Fprintf(&b, "%s[%s] %s\n", cursor, mark, label)
 		}
 	}
-	if len(m.shown) > m.height {
+	if len(m.shown) > rows {
 		fmt.Fprintf(&b, "  %s\n", pal.Wrap(term.Dim,
-			fmt.Sprintf("… %d more, ↑/↓ to scroll", len(m.shown)-m.height)))
+			fmt.Sprintf("… %d more, ↑/↓ to scroll", len(m.shown)-rows)))
 	}
 	return b.String()
 }

@@ -9,6 +9,7 @@ package picker
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -359,5 +360,257 @@ func TestSingleChoiceNoMatchDoesNotFinish(t *testing.T) {
 	pressKey(m, "esc")
 	if !m.aborted {
 		t.Fatal("escape did not cancel")
+	}
+}
+
+// resizeTo delivers the terminal size bubbletea would report after a resize.
+func resizeTo(m *Model, rows int) {
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: rows})
+}
+
+// listRows counts the item rows in a multi-select frame: the lines that carry
+// a checkbox, which excludes the title, header, filter line and footer.
+func listRows(view string) int {
+	n := 0
+	for line := range strings.SplitSeq(view, "\n") {
+		if strings.Contains(line, "[ ] ") || strings.Contains(line, "[✓] ") {
+			n++
+		}
+	}
+	return n
+}
+
+// manyItems builds n distinct rows so a window test has something to scroll.
+func manyItems(n int) []Item {
+	items := make([]Item, n)
+	for i := range items {
+		label := "role-" + strings.Repeat("x", i%3) + string(rune('a'+i%26))
+		items[i] = Item{Label: label, Haystack: strings.ToLower(label)}
+	}
+	return items
+}
+
+// TestWindowFollowsCursorAtHeightOne is the smallest window there is: every
+// move must scroll, and the one drawn row must be the cursor row.
+func TestWindowFollowsCursorAtHeightOne(t *testing.T) {
+	m := NewModel("one", manyItems(5), 1)
+	for want := range 5 {
+		if m.cursor != want || m.top != want {
+			t.Fatalf("cursor=%d top=%d, want both %d", m.cursor, m.top, want)
+		}
+		view := m.View()
+		if got := listRows(view); got != 1 {
+			t.Fatalf("a height-one window drew %d rows:\n%s", got, view)
+		}
+		if !strings.Contains(view, m.items[m.shown[m.cursor]].Label) {
+			t.Fatalf("the drawn row is not the cursor row:\n%s", view)
+		}
+		if !strings.Contains(view, "… 4 more") {
+			t.Fatalf("the footer should always say 4 more with one row drawn:\n%s", view)
+		}
+		pressKey(m, "down")
+	}
+	for range 10 {
+		pressKey(m, "up")
+	}
+	if m.cursor != 0 || m.top != 0 {
+		t.Fatalf("after scrolling back up cursor=%d top=%d, want 0 and 0", m.cursor, m.top)
+	}
+}
+
+// TestResizeShrinksThenGrowsTheWindow: a terminal too short for the requested
+// height must not push the header off the top, and growing it back must
+// restore the full window rather than a short tail.
+func TestResizeShrinksThenGrowsTheWindow(t *testing.T) {
+	m := NewModel("resize", manyItems(20), 10)
+	if got := listRows(m.View()); got != 10 {
+		t.Fatalf("before any resize the window should draw the requested 10 rows, got %d", got)
+	}
+	for range 19 {
+		pressKey(m, "down")
+	}
+	if m.cursor != 19 || m.top != 10 {
+		t.Fatalf("cursor=%d top=%d before shrink, want 19 and 10", m.cursor, m.top)
+	}
+
+	// Six terminal lines leave two for rows once the title, header, filter
+	// line and footer are drawn.
+	resizeTo(m, 6)
+	view := m.View()
+	if got := listRows(view); got != 2 {
+		t.Fatalf("a 6-line terminal should draw 2 rows, got %d:\n%s", got, view)
+	}
+	if m.top != 18 || m.cursor != 19 {
+		t.Fatalf("after shrinking cursor=%d top=%d, want 19 and 18", m.cursor, m.top)
+	}
+	if !strings.Contains(view, "… 18 more") {
+		t.Fatalf("the footer should count against the drawn rows:\n%s", view)
+	}
+	if n := strings.Count(view, "\n"); n != 6 {
+		t.Fatalf("the frame must fit the terminal: %d lines, want 6:\n%s", n, view)
+	}
+
+	// Shorter than the chrome alone: still one row, never zero or negative.
+	resizeTo(m, 2)
+	if got := listRows(m.View()); got != 1 {
+		t.Fatalf("a terminal shorter than the chrome should still draw 1 row, got %d", got)
+	}
+	pressKey(m, "up")
+	if m.top != m.cursor {
+		t.Fatalf("with one row drawn the window must follow the cursor: cursor=%d top=%d", m.cursor, m.top)
+	}
+
+	// Growing back restores the requested height, and no more.
+	resizeTo(m, 40)
+	view = m.View()
+	if got := listRows(view); got != 10 {
+		t.Fatalf("a 40-line terminal should draw the requested 10 rows again, got %d:\n%s", got, view)
+	}
+	if m.top != 10 {
+		t.Fatalf("after growing top=%d, want 10 so the window is full", m.top)
+	}
+	if !strings.Contains(view, m.items[m.shown[m.cursor]].Label) {
+		t.Fatalf("the cursor row left the window after growing:\n%s", view)
+	}
+}
+
+// TestResizeIsIgnoredBeforeAnyReport keeps the default height when bubbletea
+// has not reported a size, and after a report of zero.
+func TestResizeIsIgnoredBeforeAnyReport(t *testing.T) {
+	m := NewModel("zero", manyItems(20), 0)
+	if got := listRows(m.View()); got != 10 {
+		t.Fatalf("a non-positive height should fall back to 10 rows, got %d", got)
+	}
+	resizeTo(m, 0)
+	if got := listRows(m.View()); got != 10 {
+		t.Fatalf("a zero-height report should leave the window at 10 rows, got %d", got)
+	}
+}
+
+// TestFilterMatchesUnicodeRoleNames: role and scope names in a Swedish tenant
+// are not ASCII, and the filter must lower-case and match them the same way.
+func TestFilterMatchesUnicodeRoleNames(t *testing.T) {
+	items := []Item{
+		{Label: "Ägare @ Löpande (Subscription)", Haystack: "ägare @ löpande (subscription) 11aa"},
+		{
+			Label:    "🔑 Key Vault Administrator @ Contoso (ResourceGroup)",
+			Haystack: "🔑 key vault administrator @ contoso (resourcegroup) 22bb",
+		},
+		{Label: "Owner @ Contoso QA (Subscription)", Haystack: "owner @ contoso qa (subscription) 33cc"},
+	}
+	m := NewModel("unicode", items, 10)
+	typeText(m, "äg")
+	if len(m.shown) != 1 || m.shown[0] != 0 {
+		t.Fatalf("filtering on 'äg' shows %v, want only the Ägare row", m.shown)
+	}
+	pressKey(m, "esc")
+	typeText(m, "ÄG")
+	if len(m.shown) != 1 || m.shown[0] != 0 {
+		t.Fatalf("filtering on 'ÄG' must lower-case beyond ASCII, shows %v", m.shown)
+	}
+	pressKey(m, "backspace")
+	if m.filter != "Ä" {
+		t.Fatalf("backspace must remove one rune, not one byte: filter = %q", m.filter)
+	}
+	pressKey(m, "esc")
+	typeText(m, "löp")
+	if len(m.shown) != 1 || m.shown[0] != 0 {
+		t.Fatalf("filtering on 'löp' shows %v, want only the Löpande row", m.shown)
+	}
+	pressKey(m, "esc")
+	typeText(m, "🔑")
+	if len(m.shown) != 1 || m.shown[0] != 1 {
+		t.Fatalf("filtering on an emoji shows %v, want only the Key Vault row", m.shown)
+	}
+
+	// Rendering draws every label whole: the picker never slices a label, so
+	// no rune is cut and the frame stays valid UTF-8.
+	pressKey(m, "esc")
+	view := m.View()
+	if !utf8.ValidString(view) {
+		t.Fatalf("the frame is not valid UTF-8:\n%q", view)
+	}
+	for _, it := range items {
+		if !strings.Contains(view, it.Label) {
+			t.Errorf("label %q is not drawn intact:\n%s", it.Label, view)
+		}
+	}
+	typeText(m, "ö")
+	if got := m.View(); !strings.Contains(got, "> ö") {
+		t.Errorf("the filter line does not echo the typed rune:\n%s", got)
+	}
+}
+
+// assertStillEmpty fails the test if key left an empty picker anywhere but
+// idle: still running, cursor and window at zero, nothing shown.
+func assertStillEmpty(t *testing.T, m *Model, single bool, key string) {
+	t.Helper()
+	if m.confirmed || m.aborted {
+		t.Fatalf("single=%v: %q ended the picker", single, key)
+	}
+	if m.cursor != 0 || m.top != 0 || len(m.shown) != 0 {
+		t.Fatalf("single=%v: after %q cursor=%d top=%d shown=%v", single, key, m.cursor, m.top, m.shown)
+	}
+}
+
+// TestEmptyModelSurvivesEveryKey: a picker over nothing — every role filtered
+// out by the caller, say — must take any key without panicking, quit on the
+// exit keys, and select nothing on enter.
+func TestEmptyModelSurvivesEveryKey(t *testing.T) {
+	keys := []string{"tab", "space", "ctrl+a", "up", "down", "ctrl+n", "ctrl+p", "backspace", "x", "ö"}
+	for _, single := range []bool{false, true} {
+		m := NewModel("empty", nil, 5)
+		m.single = single
+		for _, k := range keys {
+			pressKey(m, k)
+			assertStillEmpty(t, m, single, k)
+		}
+		resizeTo(m, 3)
+		if view := m.View(); !strings.Contains(view, "nothing matches") || !strings.Contains(view, "0 of 0 shown") {
+			t.Fatalf("single=%v: an empty list needs the no-match line and a zero count:\n%s", single, view)
+		}
+		if m.selectedCount() != 0 {
+			t.Fatalf("single=%v: something got selected on an empty list", single)
+		}
+
+		// Esc clears the typed filter first, then quits.
+		pressKey(m, "esc")
+		if m.aborted || m.filter != "" {
+			t.Fatalf(
+				"single=%v: the first esc should clear the filter, aborted=%v filter=%q",
+				single,
+				m.aborted,
+				m.filter,
+			)
+		}
+		pressKey(m, "esc")
+		if !m.aborted {
+			t.Fatalf("single=%v: esc on an empty filter should quit", single)
+		}
+		if m.View() != "" {
+			t.Fatalf("single=%v: the final frame should be empty", single)
+		}
+	}
+
+	m := NewModel("empty", nil, 5)
+	pressKey(m, "ctrl+c")
+	if !m.aborted {
+		t.Fatal("ctrl+c should abort an empty picker")
+	}
+
+	// Enter on an empty multi-select confirms an empty selection: Run then
+	// returns nothing, which is the caller's decision to interpret.
+	m = NewModel("empty", nil, 5)
+	pressKey(m, "enter")
+	if !m.confirmed || m.selectedCount() != 0 {
+		t.Fatalf("enter on an empty multi-select: confirmed=%v selected=%d", m.confirmed, m.selectedCount())
+	}
+
+	// The single picker has nothing to choose, so enter is a no-op there.
+	m = NewModel("empty", nil, 5)
+	m.single = true
+	pressKey(m, "enter")
+	if m.confirmed || m.aborted {
+		t.Fatal("enter on an empty single picker must neither confirm nor abort")
 	}
 }

@@ -26,10 +26,12 @@
 //   - Mode 0600 inside a 0700 directory, written atomically via a uniquely
 //     named temporary file so two runs finishing at once cannot publish a
 //     half-written entry.
-//   - A wider mode is refused on read, with [ErrCachePermissions]: a token
-//     another account can read is worse than no cache at all. Every other
-//     defect — absent, corrupt, wrong version, wrong context, wrong tenant, wrong user — is
-//     an ordinary miss that mints a fresh token.
+//   - A wider mode is refused on read — the file's with [ErrCachePermissions],
+//     its directory's with [ErrCacheDirPermissions], so the message names the
+//     thing to chmod: a token another account can read, or can find and
+//     replace, is worse than no cache at all. Every other defect — absent,
+//     corrupt, wrong version, wrong context, wrong tenant, wrong user — is an
+//     ordinary miss that mints a fresh token.
 //   - An entry stops being used [TokenCacheMargin] before it expires, because a
 //     token that dies halfway through a run is worse than one re-minted up
 //     front.

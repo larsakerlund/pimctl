@@ -9,10 +9,10 @@ The exit-code contract will not change without a major version.
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-09-11
+## [0.5.0] - 2026-09-16
 
-Enable a project's required Azure roles with `pimctl up`, including access at
-a narrower scope than your eligibility.
+Project access files, activation at a narrower scope than your eligibility,
+and the correctness fixes from a full review of the tool.
 
 ### Added
 
@@ -27,6 +27,74 @@ a narrower scope than your eligibility.
 - `up --key KEY --at SCOPE` activates an eligible role at a narrower scope after
   Azure verifies eligibility there. Saved presets retain the narrower target;
   failed verification never falls back to broader access.
+- `pimctl --version`, and one version line everywhere:
+  `pimctl v0.4.0 (<commit>, go1.x.y, os/arch)`.
+- Inside a `cloudctx use` window a warm command reads the context's Azure CLI
+  profile directly and spawns no cloudctx process; `--all-contexts` opens its
+  contexts concurrently; a named `down` sends its requests before the
+  activation listing has answered and widens to the listing afterwards.
+- The picker follows the terminal height on resize.
+- A policy lookup reads the rules from the policy-assignment listing's
+  `effectiveRules` and fetches the policy document only when they are absent,
+  which halves the cold cost of planning each role.
+- Releases carry build provenance attestations; the release build verifies the
+  module graph instead of tidying it; CI fails on an untidy `go.mod`.
+- An issue template, `.gitattributes`, `doccheck -h`, and `make clean` removes
+  every build output.
+
+### Changed
+
+- `make check` runs the race suite twice, so a test that leaks state into a
+  later run fails locally rather than only under `-count=2`.
+- The token cache is refused when its directory is group- or other-accessible,
+  matching the file check.
+
+### Removed
+
+- The deprecated, hidden `--hours` and `--duration` flags of `up`/`activate`.
+  Use `--for` (`--for 2h`, `--for 90m`, `--for PT2H30M`); passing either old
+  flag now fails with `unknown flag`.
+
+### Fixed
+
+- `down --role`, `--scope` and `--key` now reach an activation made at a
+  narrower scope with `up --at`, including one made on another machine. Before,
+  the request went to the granting scope, ARM answered that no such assignment
+  existed, and the role stayed held behind a NOT ACTIVE row and exit 0.
+- An ARM refusal saying an earlier request still exists (`RoleAssignmentRequestExists`,
+  `RoleAssignmentScheduleRequestExists`) is no longer reported as ALREADY
+  ACTIVE and recorded as a held role. It is a failure that points at
+  `pimctl status`; the record is not written.
+- A Conditional Access claims challenge, and any 401 on the write path, drops
+  the cached token so the next run re-mints instead of failing the same way
+  until `--refresh`.
+- In `up`, a failed or slow activation listing no longer changes the exit code
+  depending on whether it landed in time, and is never reported twice. Every
+  scope the already-active check could not read is named once on stderr.
+- A poll read that fails after ARM accepted the request is retried within the
+  poll budget; when the budget ends, the row reports the last observed status
+  and points at `pimctl status` instead of claiming FAILED. A 401 during the
+  poll returns at once so the token can be refreshed.
+- Revoked, Expired and RevokedAndCanceled are terminal, so a request that ends
+  there no longer polls for two minutes before saying so.
+- A record entry stamped in the future (a clock stepped back after `down`) is
+  dropped instead of hiding a role ARM still lists.
+- The activation record is written under an advisory lock, so two pimctl
+  processes cannot lose each other's entries.
+- The `status` fast path says the empty table came from this machine's record
+  and that Azure is still being asked.
+- The wait before a retry is capped at 60 seconds whatever `Retry-After` says.
+- ISO-8601 durations that would overflow are rejected instead of wrapping, and
+  a subscription name is no longer cut in the middle of a non-ASCII character.
+- A context name that starts with `-`, contains whitespace or a path separator
+  is refused before anything is spawned, from `-c`, a preset, `--all-contexts`
+  and `$CLOUDCTX_CONTEXT` alike.
+- A cloudctx version below the minimum is no longer cached for a day, and
+  `pimctl cache clear` removes the probed version along with the other caches.
+- The token's expiry is read from az's epoch `expires_on` when present, so a
+  timezone change between runs cannot shift it.
+- Boolean flags no longer render as if they took a value in `--help`.
+- `down PRESET --preset OTHER` is refused the way `up` refuses it.
 
 ## [0.3.0] - 2026-09-11
 
@@ -238,7 +306,7 @@ its last known state and is named.
 - macOS and Linux only. Paths, file modes and the pty tests assume a POSIX
   machine.
 
-[Unreleased]: https://github.com/larsakerlund/pimctl/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.4.0
+[Unreleased]: https://github.com/larsakerlund/pimctl/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.5.0
 [0.3.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.3.0
 [0.2.0]: https://github.com/larsakerlund/pimctl/releases/tag/v0.2.0

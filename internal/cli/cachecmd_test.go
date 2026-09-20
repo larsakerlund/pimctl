@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +41,52 @@ func TestCacheClearRemovesBothCachesAndSaysWhatItDidNotDo(t *testing.T) {
 	}
 	if _, _, ok := cache.Read(testOwner("contoso")); ok {
 		t.Error("the listing cache survived")
+	}
+}
+
+// TestCacheClearForgetsTheProbedCloudctxVersion: the version probe is the
+// fourth thing pimctl re-derives, and `cache clear` promises all of them. It
+// says so only when there was one to forget, so a machine without cloudctx is
+// not told about a tool it does not have.
+func TestCacheClearForgetsTheProbedCloudctxVersion(t *testing.T) {
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	dir := filepath.Join(cacheHome, "pimctl")
+	if err := os.MkdirAll(dir, store.DirMode); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(dir, "cloudctx-version.json")
+	if err := os.WriteFile(probe, []byte(`{"version":"1.4.0"}`), store.SecretFileMode); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runCmd(t, "cache", "clear")
+	if err != nil {
+		t.Fatalf("cache clear: %v", err)
+	}
+	if _, statErr := os.Stat(probe); statErr == nil {
+		t.Error("the probed cloudctx version survived `cache clear`")
+	}
+	if !strings.Contains(out, "cloudctx version") {
+		t.Errorf("cache clear must say it forgot the version:\n%s", out)
+	}
+
+	// With nothing to forget, nothing is said about it.
+	out, _, err = runCmd(t, "cache", "clear")
+	if err != nil {
+		t.Fatalf("second cache clear: %v", err)
+	}
+	if strings.Contains(out, "cloudctx version") {
+		t.Errorf("nothing was forgotten this time, so nothing should be said:\n%s", out)
+	}
+
+	// And the help lists it among what is cleared.
+	help, _, err := runCmd(t, "cache", "clear", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(help, "cloudctx version") {
+		t.Errorf("the help does not mention the cloudctx version:\n%s", help)
 	}
 }
 
@@ -97,6 +145,40 @@ func TestCacheClearKeepsTheActivationRecord(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "may not show roles you are still holding") {
 		t.Errorf("cache clear --all must warn about the consequence: %q", errOut)
+	}
+}
+
+// TestCacheClearAllSweepsTheLockSidecarWithoutNamingIt: the lock beside a
+// record shares its "active-" prefix but holds no entries and belongs to no
+// context. Read as a record it is counted and its name — context plus account
+// digest plus ".json.lock" — is printed back at the user as a cloudctx context.
+func TestCacheClearAllSweepsTheLockSidecarWithoutNamingIt(t *testing.T) {
+	f := &fakeARM{t: t, eligibilities: twoLowImpactRoles()}
+	f.install()
+	owner := testOwner("contoso")
+	// updateRecord, not writeRecord: only the production writer takes the lock,
+	// so only it leaves the sidecar this test is about.
+	entry := mkRecordEntry("Cost Management Contributor", "contoso-prod", time.Hour)
+	updateRecord(owner, func(existing []recordEntry) []recordEntry {
+		return mergeEntries(existing, []recordEntry{entry})
+	})
+	path, err := recordPath(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(path + recordLockSuffix); statErr != nil {
+		t.Fatalf("the fixture left no lock sidecar to sweep: %v", statErr)
+	}
+
+	out, _, err := runCmd(t, "cache", "clear", "--all")
+	if err != nil {
+		t.Fatalf("cache clear --all: %v", err)
+	}
+	if !strings.Contains(out, "Forgot 1 activation(s) across contoso.\n") {
+		t.Errorf("the sidecar was counted as a record or named as a context:\n%s", out)
+	}
+	if _, statErr := os.Stat(path + recordLockSuffix); !os.IsNotExist(statErr) {
+		t.Errorf("the lock outlived the record it guards: %v", statErr)
 	}
 }
 

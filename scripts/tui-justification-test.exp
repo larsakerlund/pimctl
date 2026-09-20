@@ -5,8 +5,10 @@
 # returns it verbatim rather than an empty string.
 #
 # Usage:
-#   go build -tags tuiprobe -o /tmp/pimctl-tuiprobe ./cmd/tuiprobe
-#   expect scripts/tui-justification-test.exp /tmp/pimctl-tuiprobe
+#   go build -tags tuiprobe -o bin/pimctl-tuiprobe ./cmd/tuiprobe
+#   expect scripts/tui-justification-test.exp bin/pimctl-tuiprobe
+#
+# `make tui-test` does both, for every script in this directory.
 #
 # Patterns are written with -re and literal text: a $variable inside a braced
 # expect pattern is not substituted, which silently never matches.
